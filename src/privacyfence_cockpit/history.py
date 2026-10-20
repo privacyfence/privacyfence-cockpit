@@ -213,7 +213,7 @@ class History:
 
     def export_csv(self, f: HistoryFilter, out: TextIO) -> int:
         where, params = _where(f)
-        rows = self._db.query(f"SELECT * FROM runs{where} ORDER BY started_at ASC, id ASC", params)  # noqa: S608
+        rows = self._db.query(f"SELECT * FROM runs{where} ORDER BY started_at ASC, id ASC", params)  # noqa: S608  # nosec B608  # fixed clauses, values bound
         writer = csv.writer(out, lineterminator="\n")
         writer.writerow(CSV_COLUMNS)
         for r in map(_row, rows):
