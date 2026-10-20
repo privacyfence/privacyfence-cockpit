@@ -3,7 +3,7 @@
 PrivacyFence Cockpit is a Docker image that runs [privacyfence-sync](https://github.com/privacyfence/privacyfence)
 recipes on its own schedule and shows their state in a web dashboard. It is a companion to PrivacyFence, released
 and versioned separately, and it holds only PrivacyFence scoped tokens, never connector credentials. The reasoning is
-in the [architecture decision records](docs/adr/README.md).
+in the [architecture decision records](docs/adr/README.md). See also [0002](docs/adr/0002-one-owner-per-container-with-a-local-password-bootstrapped-by-a-one-time-setup-code.md), [0003](docs/adr/0003-secrets-are-encrypted-on-the-volume-with-a-key-from-a-docker-secret-and-only-one-recipe-token-reaches-a-subprocess.md), [0004](docs/adr/0004-schedules-live-in-cockpit-yaml-in-the-recipe-repository.md), [0005](docs/adr/0005-missed-scheduled-runs-are-recorded-and-notified-never-caught-up.md), [0006](docs/adr/0006-the-recipe-checkout-changes-only-on-the-owners-request-fast-forward-only-and-is-never-committed-to.md) and [0007](docs/adr/0007-one-multi-arch-image-on-ghcr-published-with-provenance-by-the-run-that-cuts-the-tag.md).
 
 - One container, one owner, one private recipe repository (deploy key or read-only access token).
 - Schedules live in the recipe repository's `cockpit.yaml`. Runs are serial, logged, recorded in SQLite, and failures

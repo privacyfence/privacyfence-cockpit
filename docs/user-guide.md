@@ -3,7 +3,7 @@
 This guide describes PrivacyFence Cockpit as it behaves today. For installation, the master key and the environment
 variables, see the [README](../README.md). For the layout of the recipe repository and `cockpit.yaml`, see
 [the recipe repository guide](recipe-repository.md). The reasoning behind the design is in the
-[architecture decision records](adr/README.md).
+[architecture decision records](adr/README.md). See also [0002](adr/0002-one-owner-per-container-with-a-local-password-bootstrapped-by-a-one-time-setup-code.md), [0003](adr/0003-secrets-are-encrypted-on-the-volume-with-a-key-from-a-docker-secret-and-only-one-recipe-token-reaches-a-subprocess.md), [0004](adr/0004-schedules-live-in-cockpit-yaml-in-the-recipe-repository.md), [0005](adr/0005-missed-scheduled-runs-are-recorded-and-notified-never-caught-up.md), [0006](adr/0006-the-recipe-checkout-changes-only-on-the-owners-request-fast-forward-only-and-is-never-committed-to.md) and [0007](adr/0007-one-multi-arch-image-on-ghcr-published-with-provenance-by-the-run-that-cuts-the-tag.md).
 
 The commands below assume the compose service is called `cockpit`, as in [`docker-compose.yml`](../docker-compose.yml).
 Run the `cockpit` command line inside the running container:
