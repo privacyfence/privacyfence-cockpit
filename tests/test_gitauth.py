@@ -221,6 +221,7 @@ def test_ssh_key_file_matches_public_key(db, store, paths):
 
 def test_https_credentials_with_real_git(db, store, paths):
     db.set_setting("git.auth", "https")
+    db.set_setting("git.repo_url", "https://github.com/org/repo.git")
     factory = credentials_factory(db, store, paths)
     with pytest.raises(GitError, match="No access token: add one on the Code page."):
         with factory():
@@ -258,6 +259,7 @@ def test_https_credentials_with_real_git(db, store, paths):
 
 def test_https_helper_ignores_store_and_erase(db, store, paths):
     db.set_setting("git.auth", "https")
+    db.set_setting("git.repo_url", "https://github.com/org/repo.git")
     set_pat(store, PAT)
     with credentials_factory(db, store, paths)() as env:
         out = subprocess.run(  # noqa: S603, S607
@@ -281,6 +283,7 @@ def test_no_credentials_for_other_modes(db, store, paths, auth):
 
 def test_temp_folder_removed_when_body_raises(db, store, paths):
     db.set_setting("git.auth", "https")
+    db.set_setting("git.repo_url", "https://github.com/org/repo.git")
     set_pat(store, PAT)
     seen = []
     with pytest.raises(RuntimeError):
@@ -289,3 +292,41 @@ def test_temp_folder_removed_when_body_raises(db, store, paths):
             raise RuntimeError("boom")
     assert not Path(seen[0]).exists()
     assert gitauth.GITHUB_HOST == "github.com"
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [("github.com", True), ("evil.example", False), ("github.com.evil.example", False), ("redirect.example", False)],
+)
+def test_https_helper_only_answers_for_the_configured_host(db, store, paths, host, expected):
+    db.set_setting("git.auth", "https")
+    db.set_setting("git.repo_url", "https://github.com/org/repo.git")
+    set_pat(store, PAT)
+    with credentials_factory(db, store, paths)() as env:
+        result = subprocess.run(  # noqa: S603, S607
+            ["git", "credential", "fill"],
+            input=f"protocol=https\nhost={host}\n\n",
+            env={
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "HOME": str(paths.home),
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                **env,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert (f"password={PAT}" in result.stdout.splitlines()) is expected
+    assert expected or PAT not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("url", [None, "ssh://git@github.com/org/repo.git", "/srv/repo", "https://:x"])
+def test_https_credentials_need_an_https_repository(db, store, paths, url):
+    db.set_setting("git.auth", "https")
+    if url:
+        db.set_setting("git.repo_url", url)
+    set_pat(store, PAT)
+    with pytest.raises(GitError, match="https:// repository URL"):
+        with credentials_factory(db, store, paths)():
+            pass
