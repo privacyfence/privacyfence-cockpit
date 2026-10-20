@@ -9,11 +9,21 @@ description = "A container that runs privacyfence-sync recipes on a schedule, wi
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
-dependencies = []
+dependencies = [
+  "starlette>=1.9,<2",
+  "jinja2>=3.1.6,<4",
+  "uvicorn>=0.54,<1",
+  "python-multipart>=0.0.32",
+  "croniter>=6.2,<7",
+  "pyyaml>=6.0.3,<7",
+  "cryptography>=50",
+  "mcp>=2.3,<3",
+  "httpx2>=2.15",
+]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-cov", "pytest-asyncio"]
-dev = ["ruff", "mypy", "bandit"]
+test = ["pytest", "pytest-cov", "pytest-asyncio", "httpx"]
+dev = ["ruff", "mypy", "bandit", "types-PyYAML", "types-croniter"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -36,7 +46,7 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S103", "S105", "S106", "S108", "S603", "S607"]
 
 [tool.mypy]
 strict = true
