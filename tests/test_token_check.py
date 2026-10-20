@@ -8,6 +8,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
 
+from privacyfence_cockpit.crypto import SecretDecryptError
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import EventKind, ListSink
@@ -16,6 +17,7 @@ from privacyfence_cockpit.token_check import (
     NOT_SCOPED_ERROR,
     REFUSED_ERROR,
     STATUS_REASON,
+    UNDECRYPTABLE_ERROR,
     TokenCheck,
     TokenChecker,
     TokenState,
@@ -284,3 +286,33 @@ async def test_check_all_sets_last_check(h):
     h.store.delete("token", "other")
     await h.checker.check_all()
     assert h.db.get_setting("tokens.last_check_at") == "2026-10-20T07:00:00Z"
+
+
+async def test_text_that_is_not_json_is_not_scoped():
+    server = MCPServer("fake")
+
+    @server.tool(structured_output=False)
+    def privacyfence_status(reason: str) -> str:
+        return "service unavailable"
+
+    app = server.streamable_http_app(
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    )
+    async with app.router.lifespan_context(app):
+        status = await fetch_status(URL, TOKEN, transport=httpx2.ASGITransport(app=app))
+    assert classify(status).state == TokenState.NOT_SCOPED
+
+
+async def test_check_all_survives_an_undecryptable_token(h):
+    h.store.set("token", "bad", TOKEN)
+    h.store.set("token", "default", TOKEN)
+    h.store._file("token", "bad").write_bytes(b"garbage")
+    h.queue = [h.status(60, expiring=False)]
+    with pytest.raises(SecretDecryptError):
+        await h.checker.check_one("bad")
+    results = await h.checker.check_all()
+    assert results["bad"].state == TokenState.REFUSED
+    assert results["bad"].error == UNDECRYPTABLE_ERROR
+    assert TOKEN not in (results["bad"].error or "")
+    assert results["default"].state == TokenState.OK
+    assert h.db.get_setting("tokens.last_check_at") == "2026-10-20T06:00:00Z"

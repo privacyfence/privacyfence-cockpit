@@ -15,6 +15,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import TextContent
 
+from privacyfence_cockpit.crypto import SecretDecryptError
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import Event, EventKind, EventSink
@@ -25,6 +26,7 @@ from privacyfence_cockpit.tokens import TokenResolver
 STATUS_REASON = "privacyfence-cockpit token check"
 THRESHOLDS = (1, 7, 14)
 REFUSED_ERROR = "refused by PrivacyFence: the token is revoked or expired, or the server URL is wrong"
+UNDECRYPTABLE_ERROR = "A stored token cannot be decrypted with this master key. Delete it and set it again."
 NOT_SCOPED_ERROR = "not a scoped token; v1 supports PrivacyFence scoped tokens only"
 
 
@@ -53,6 +55,13 @@ def _first_leaf(exc: BaseException) -> BaseException:
     return exc
 
 
+def _parse_json(text: str) -> object:
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
 async def _call_status(server_url: str, http_client: httpx2.AsyncClient) -> dict[str, Any]:
     async with streamable_http_client(server_url, http_client=http_client) as streams:
         async with ClientSession(streams[0], streams[1]) as session:
@@ -64,7 +73,7 @@ async def _call_status(server_url: str, http_client: httpx2.AsyncClient) -> dict
     if isinstance(structured, dict):
         return structured
     for block in result.content:
-        parsed = json.loads(block.text) if isinstance(block, TextContent) else None
+        parsed = _parse_json(block.text) if isinstance(block, TextContent) else None
         if isinstance(parsed, dict):
             return parsed
     return {}
@@ -142,6 +151,15 @@ class TokenChecker:
         self._record(name, result)
         return result
 
+    async def _check_guarded(self, name: str) -> TokenCheck:
+        """One token of a pass: a token that cannot be read is recorded as refused and the pass goes on."""
+        try:
+            return await self.check_one(name)
+        except SecretDecryptError:
+            result = TokenCheck(TokenState.REFUSED, error=UNDECRYPTABLE_ERROR)
+            self._record(name, result)
+            return result
+
     async def _query(self, name: str, server_url: str) -> TokenCheck:
         token = self._resolver.resolve_name(name)
         if token is None:
@@ -155,7 +173,7 @@ class TokenChecker:
         return classify(status)
 
     async def check_all(self) -> dict[str, TokenCheck]:
-        results = {name: await self.check_one(name) for name in self._store.names("token")}
+        results = {name: await self._check_guarded(name) for name in self._store.names("token")}
         self._db.set_setting("tokens.last_check_at", iso(self._clock()))
         return results
 

@@ -175,6 +175,18 @@ def confirm_host_keys(db: Database, paths: DataPaths) -> list[HostKey]:
     return keys
 
 
+def _https_origin(url: str) -> str:
+    """The https://host[:port] the token may be sent to: the host of the configured repository, nothing else."""
+    try:
+        parts = urlsplit(url)
+        hostname, port = parts.hostname, parts.port
+    except ValueError:
+        raise GitError("The access token needs an https:// repository URL.") from None
+    if parts.scheme != "https" or not hostname:
+        raise GitError("The access token needs an https:// repository URL.")
+    return f"https://{hostname}" + (f":{port}" if port else "")
+
+
 def credentials_factory(db: Database, store: SecretStore, paths: DataPaths) -> Credentials:
     @contextmanager
     def credentials() -> Iterator[dict[str, str]]:
@@ -190,6 +202,7 @@ def credentials_factory(db: Database, store: SecretStore, paths: DataPaths) -> C
             secret = store.get("git", "pat")
             if secret is None:
                 raise GitError("No access token: add one on the Code page.")
+            origin = _https_origin(db.get_setting("git.repo_url") or "")
         folder = Path(tempfile.mkdtemp(prefix="cockpit-git-"))
         try:
             if auth == "ssh":
@@ -224,7 +237,7 @@ def credentials_factory(db: Database, store: SecretStore, paths: DataPaths) -> C
                     "GIT_CONFIG_COUNT": "2",
                     "GIT_CONFIG_KEY_0": "credential.helper",
                     "GIT_CONFIG_VALUE_0": "",
-                    "GIT_CONFIG_KEY_1": "credential.helper",
+                    "GIT_CONFIG_KEY_1": f"credential.{origin}.helper",
                     "GIT_CONFIG_VALUE_1": helper,
                 }
         finally:
