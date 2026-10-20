@@ -41,6 +41,14 @@ SHUTDOWN_NOTE = "the cockpit was shut down"
 _POLL_SECONDS = 0.02
 _RUN_MODES = frozenset({Mode.ATTENDED, Mode.UNATTENDED, Mode.REPLAY})
 NOTHING_TO_REPLAY = "nothing to replay: the first step writes"
+_READ_CHUNK = 65536
+_MAX_LINE_BYTES = 1024 * 1024
+LINE_TRUNCATED = " ... [line truncated]"
+
+
+def _unexpected_note(error: Exception) -> str:
+    """Names the exception type only: its message could carry a token or recipe data."""
+    return f"unexpected error: {type(error).__name__}"
 
 
 @dataclass(frozen=True)
@@ -106,38 +114,60 @@ class Runner:
         result_dir = Path(tempfile.mkdtemp(prefix="cockpit-run-")) if mode in _RUN_MODES else None
         replay_file = recipe.dir / REPLAY_FILE
         try:
-            result_file = None if result_dir is None else result_dir / "result.json"
-            sync = self._venvs.sync_bin(venv) if venv is not None else self._venvs.sync_bin(Path("venv"))
-            nothing_to_replay = mode is Mode.REPLAY and cut_replay(recipe.yaml_path) is None
-            argv = self._argv(sync, recipe, mode, attended, result_file)
-            with log_file.open("w", encoding="utf-8") as log:
-                self._write_header(log, run_id, recipe, mode, trigger, argv, token, commit, start)
-                problems = cockpit_problems(recipe, self._paths.repo) if mode is Mode.CHECK else []
-                for problem in problems:
-                    self._emit(log, on_line, f"# cockpit check: {problem}")
-                if nothing_to_replay:
-                    self._emit(log, on_line, f"# {NOTHING_TO_REPLAY}")
-                    outcome, exit_code, note = Outcome.OK, None, NOTHING_TO_REPLAY
-                elif venv is None:
-                    reason = self._history_db_setting("venv.last_error") or "no environment has been built"
-                    self._emit(log, on_line, f"# the recipe environment is not ready: {reason}")
-                    outcome, exit_code, note = Outcome.FAILED, None, None
-                else:
-                    outcome, exit_code, note = await self._execute(
-                        run_id, recipe, mode, argv, self._env(venv, eff, token, mode), eff, result_file, log, on_line
-                    )
-                    if problems:
-                        outcome = Outcome.RECIPE_ERROR
-                finished = self._clock()
-                self._history.finish(run_id, outcome=outcome, exit_code=exit_code, finished_at=finished, note=note)
-                self._history.set_pid(run_id, None)
-                self._write_footer(log, exit_code, outcome, start, finished)
+            try:
+                result_file = None if result_dir is None else result_dir / "result.json"
+                sync = self._venvs.sync_bin(venv) if venv is not None else self._venvs.sync_bin(Path("venv"))
+                nothing_to_replay = mode is Mode.REPLAY and cut_replay(recipe.yaml_path) is None
+                argv = self._argv(sync, recipe, mode, attended, result_file)
+                with log_file.open("w", encoding="utf-8") as log:
+                    self._write_header(log, run_id, recipe, mode, trigger, argv, token, commit, start)
+                    problems = cockpit_problems(recipe, self._paths.repo) if mode is Mode.CHECK else []
+                    for problem in problems:
+                        self._emit(log, on_line, f"# cockpit check: {problem}")
+                    if nothing_to_replay:
+                        self._emit(log, on_line, f"# {NOTHING_TO_REPLAY}")
+                        outcome, exit_code, note = Outcome.OK, None, NOTHING_TO_REPLAY
+                    elif venv is None:
+                        reason = self._history_db_setting("venv.last_error") or "no environment has been built"
+                        self._emit(log, on_line, f"# the recipe environment is not ready: {reason}")
+                        outcome, exit_code, note = Outcome.FAILED, None, None
+                    else:
+                        outcome, exit_code, note = await self._execute(
+                            run_id,
+                            recipe,
+                            mode,
+                            argv,
+                            self._env(venv, eff, token, mode),
+                            eff,
+                            result_file,
+                            log,
+                            on_line,
+                        )
+                        if problems:
+                            outcome = Outcome.RECIPE_ERROR
+                    finished = self._clock()
+                    self._history.finish(run_id, outcome=outcome, exit_code=exit_code, finished_at=finished, note=note)
+                    self._history.set_pid(run_id, None)
+                    self._write_footer(log, exit_code, outcome, start, finished)
+            except Exception as error:  # noqa: BLE001  # any failure must still finish the row and the log
+                outcome, exit_code = Outcome.FAILED, None
+                self._finish_unexpected(run_id, log_file, start, error)
         finally:
             if result_dir is not None:
                 shutil.rmtree(result_dir, ignore_errors=True)
             if mode is Mode.REPLAY:
                 replay_file.unlink(missing_ok=True)
         return RunResult(run_id=run_id, outcome=outcome, exit_code=exit_code, log_path=log_file)
+
+    def _finish_unexpected(self, run_id: int, log_file: Path, start: datetime, error: Exception) -> None:
+        finished = self._clock()
+        self._history.finish(
+            run_id, outcome=Outcome.FAILED, exit_code=None, finished_at=finished, note=_unexpected_note(error)
+        )
+        self._history.set_pid(run_id, None)
+        with log_file.open("a", encoding="utf-8") as log:
+            self._emit(log, None, f"# the run failed unexpectedly: {type(error).__name__}")
+            self._write_footer(log, None, Outcome.FAILED, start, finished)
 
     def stop(self, run_id: int) -> bool:
         row = self._history.request_stop(run_id)
@@ -276,6 +306,13 @@ class Runner:
             self._history.set_pid(run_id, None)
             self._write_footer(log, None, Outcome.STOPPED, finished, finished)
             raise
+        except Exception as error:  # noqa: BLE001  # the group must not outlive a failed run
+            if proc is not None:
+                await asyncio.to_thread(self._terminate_group, proc.pid)
+                await proc.wait()
+                self._history.set_pid(run_id, None)
+            self._emit(log, None, f"# the run failed unexpectedly: {type(error).__name__}")
+            return Outcome.FAILED, None, _unexpected_note(error)
         exit_code = proc.returncode
         row = self._history.get(run_id)
         if row is not None and row.stop_requested:
@@ -290,9 +327,30 @@ class Runner:
         self, proc: asyncio.subprocess.Process, log: IO[str], on_line: Callable[[str], None] | None
     ) -> None:
         assert proc.stdout is not None  # noqa: S101  # nosec B101  # stdout is a PIPE
-        async for raw in proc.stdout:
-            self._emit(log, on_line, raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+        pending = bytearray()
+        dropping = False
+        while chunk := await proc.stdout.read(_READ_CHUNK):
+            while chunk:
+                end = chunk.find(b"\n")
+                piece, chunk = (chunk, b"") if end < 0 else (chunk[:end], chunk[end + 1 :])
+                if not dropping:
+                    pending += piece
+                    if len(pending) > _MAX_LINE_BYTES:
+                        del pending[_MAX_LINE_BYTES:]
+                        dropping = True
+                if end >= 0:
+                    self._emit_line(log, on_line, pending, dropping)
+                    pending.clear()
+                    dropping = False
+        if pending or dropping:
+            self._emit_line(log, on_line, pending, dropping)
         await proc.wait()
+
+    def _emit_line(
+        self, log: IO[str], on_line: Callable[[str], None] | None, raw: bytearray, truncated: bool
+    ) -> None:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        self._emit(log, on_line, line + LINE_TRUNCATED if truncated else line)
 
     def _result_outcome(self, result_file: Path | None) -> Outcome:
         if result_file is None:
