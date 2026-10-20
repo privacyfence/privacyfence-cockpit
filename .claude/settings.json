@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(pytest:*)",
+      "Bash(python3 -m pytest:*)",
+      "Bash(ruff check:*)",
+      "Bash(python3 -m mypy:*)",
+      "Bash(bandit:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git tag --list:*)",
+      "Bash(git describe:*)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "mcp__github__actions_list",
+      "mcp__github__actions_get",
+      "mcp__github__get_job_logs",
+      "mcp__github__get_check_run",
+      "mcp__github__pull_request_read",
+      "mcp__github__list_pull_requests",
+      "mcp__github__list_commits",
+      "mcp__github__get_file_contents"
+    ]
+  }
+}

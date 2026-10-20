@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # full history + tags -- setuptools_scm needs them
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -e ".[dev,test]"
+
+      - name: Tests with coverage
+        run: python3 -m pytest -v --cov=privacyfence_cockpit --cov-branch --cov-report=term-missing --cov-fail-under=95
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Types
+        run: python3 -m mypy
+
+      - name: Security lint
+        run: bandit -c pyproject.toml -r src
