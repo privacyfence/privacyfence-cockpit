@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chip, post_button %}
+{% block title %}Schedules · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Schedules</h1>
+{% if error %}
+<p class="banner banner-error" role="alert">{{ error }}</p>
+{% elif not views %}
+<p class="muted">No schedules. Add them under <code>schedules:</code> in cockpit.yaml in the recipe repository.</p>
+{% else %}
+<table class="data">
+  <thead>
+    <tr><th>Name</th><th>Cron</th><th>Runs</th><th>Next run</th><th>State</th><th>Last run</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for view in views %}
+    {% set s = view.schedule %}
+    <tr>
+      <td>{{ s.name }}</td>
+      <td><span class="mono">{{ s.cron }}</span><br><span class="muted">{{ tz }}</span></td>
+      <td>
+        {% for selector in s.run %}<span class="mono">{{ selector }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% if s.repeat > 1 %}<br><span class="muted">repeat {{ s.repeat }}×</span>{% endif %}
+        {% if s.stop_on_error %}<br><span class="muted">stops on error</span>{% endif %}
+      </td>
+      <td>{% if view.next_fire %}{{ view.next_fire|localtime(tz) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if view.paused %}paused{% else %}active{% endif %}</td>
+      <td>
+        {% if view.last_run %}
+          {{ chip(view.last_run.outcome.value if view.last_run.outcome else None) }}
+          {% if view.last_run.recipe_path %}
+          <a href="/runs/{{ view.last_run.id }}">{{ view.last_run.started_at|localtime(tz) }}</a>
+          {% else %}
+          {{ view.last_run.started_at|localtime(tz) }}
+          {% endif %}
+        {% else %}
+          <span class="muted">never</span>
+        {% endif %}
+      </td>
+      <td class="actions">
+        {% if view.paused %}
+        {{ post_button("/schedules/" ~ s.name ~ "/resume", "Resume", csrf_token) }}
+        {% else %}
+        {{ post_button("/schedules/" ~ s.name ~ "/pause", "Pause", csrf_token) }}
+        {% endif %}
+        {{ post_button("/schedules/" ~ s.name ~ "/run", "Run now", csrf_token) }}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Missed runs</h2>
+{% if missed %}
+<table class="data">
+  <thead><tr><th>Schedule</th><th>When</th><th>Note</th></tr></thead>
+  <tbody>
+  {% for row in missed %}
+    <tr>
+      <td>{{ row.trigger.removeprefix("schedule:") }}</td>
+      <td>{{ row.started_at|localtime(tz) }}</td>
+      <td>{{ row.note or "" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Nothing was missed.</p>
+{% endif %}
+<p class="muted">Missed runs are recorded and reported, never caught up.</p>
+{% endblock %}
