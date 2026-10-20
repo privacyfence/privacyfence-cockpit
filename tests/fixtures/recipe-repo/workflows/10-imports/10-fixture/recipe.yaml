@@ -1,0 +1,4 @@
+version: 1
+name: fixture
+work_dir: work
+steps: [{id: hello, run: scripts/hello.py, args: []}]

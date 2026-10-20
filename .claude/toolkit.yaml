@@ -36,3 +36,15 @@ verify:
   dod_doc: docs/coding-guidelines.md#definition-of-done
 
 stacks: [python]
+
+ci:
+  dispatchable:
+    - workflow: image.yml
+      use_when: Anything that needs docker build or a running container (the image smoke test)
+      notes: >-
+        Dispatch on your pushed branch (ref = the branch). It builds amd64 and runs
+        scripts/smoke_image.sh, and builds arm64 without pushing. It only becomes dispatchable once
+        it is on main; before that it runs on pull requests that touch the image's inputs.
+    - workflow: release.yml
+      use_when: Checking that a release would pass, never to cut one
+      notes: Dispatch on main with dry_run true only. Cutting a release is the maintainer's decision.

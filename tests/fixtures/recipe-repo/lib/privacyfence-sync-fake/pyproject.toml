@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "privacyfence-sync"
+version = "0.0.0+fake"
+description = "A stand-in for privacyfence-sync used by the image smoke test."
+
+[project.scripts]
+privacyfence-sync = "privacyfence_sync_fake:main"
+
+[tool.setuptools]
+py-modules = ["privacyfence_sync_fake"]
