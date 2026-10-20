@@ -22,6 +22,8 @@ FAILING_AFTER = timedelta(hours=24)
 FETCH_NOTICE = "git:fetch-failing"
 
 _URL = re.compile(r"^(https://|ssh://|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:)")
+_SCHEME_URL = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$", re.DOTALL)
+_URL_USERINFO = re.compile(r"(://)\S*@")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _AUTH_MODES = ("ssh", "https", "none")
@@ -93,6 +95,8 @@ class GitManager:
         is_local = url.startswith("/") or url.startswith("file://")
         if not (_URL.match(url) or is_local):
             raise GitError("The repository URL must be https://, ssh://, user@host:path or a local path.")
+        if _carries_credentials(url):
+            raise GitError("Do not put credentials in the repository URL; use the access token field instead.")
         if not _BRANCH.match(branch) or branch.startswith("-"):
             raise GitError("That is not a valid branch name.")
         if auth not in _AUTH_MODES:
@@ -315,8 +319,25 @@ class GitManager:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def _carries_credentials(url: str) -> bool:
+    match = _SCHEME_URL.match(url)
+    if match is None:
+        return False
+    scheme, rest = match.group(1).lower(), match.group(2)
+    userinfo, at, _ = rest.rpartition("@")
+    if not at:
+        return False
+    if scheme in ("http", "https"):
+        return True
+    return scheme == "ssh" and (":" in userinfo or "/" in userinfo)
+
+
+def _scrub(text: str) -> str:
+    return _URL_USERINFO.sub(r"\1***@", text)
+
+
 def _first_line(text: str) -> str:
-    lines = text.strip().splitlines()
+    lines = _scrub(text).strip().splitlines()
     return lines[0][:200] if lines else "unknown error"
 
 

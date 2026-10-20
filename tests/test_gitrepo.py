@@ -6,7 +6,7 @@ import pytest
 
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.events import EventKind, ListSink
-from privacyfence_cockpit.gitrepo import GitError, GitManager, no_credentials
+from privacyfence_cockpit.gitrepo import GitError, GitManager, _first_line, no_credentials
 from privacyfence_cockpit.models import utc_now
 from privacyfence_cockpit.paths import DataPaths
 from tests.gitutil import git, make_remote, push_commit, rewrite_history
@@ -52,6 +52,52 @@ def test_configure_validation(env):
             manager.configure("/x/y", branch, "none")
     with pytest.raises(GitError):
         manager.configure("/x/y", "main", "token")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pw@host/r.git",
+        "https://tokenonly@host/r.git",
+        "https://user:p%40ss/w@rd!@host/r.git",
+        "ssh://user:pw@host/r.git",
+    ],
+)
+def test_configure_rejects_credentials_in_url(env, url):
+    manager, _, db, *_ = env
+    before = db.get_setting("git.repo_url")
+    with pytest.raises(GitError, match="access token field") as info:
+        manager.configure(url, "main", "https")
+    assert "pw" not in str(info.value) and "tokenonly" not in str(info.value)
+    assert db.get_setting("git.repo_url") == before
+
+
+@pytest.mark.parametrize(
+    "url", ["git@github.com:org/repo.git", "ssh://git@host/r.git", "https://host/r.git", "/some/local/path"]
+)
+def test_configure_accepts_credential_free_urls(env, url):
+    env[0].configure(url, "main", "none")
+    assert env[2].get_setting("git.repo_url") == url
+
+
+def test_first_line_scrubs_credentials_before_truncating():
+    assert _first_line("fatal: unable to access 'https://user:pw@host/x/': 404\nmore") == (
+        "fatal: unable to access 'https://***@host/x/': 404"
+    )
+    prefix = "x" * 180
+    line = _first_line(f"{prefix} https://user:supersecretpassword@host/x")
+    assert "supersecret" not in line and "user:" not in line and len(line) <= 200
+    assert _first_line("") == "unknown error"
+
+
+def test_fetch_error_never_stores_url_credentials(cloned):
+    manager, _, db, remote, *_ = cloned
+    git(cloned[1].repo, "remote", "set-url", "origin", "file:///nonexistent/https://user:s3cretpw@host/r.git")
+    with pytest.raises(GitError) as info:
+        manager.fetch()
+    assert "https://***@host/r.git" in str(info.value)
+    assert "s3cretpw" not in str(info.value)
+    assert "s3cretpw" not in (db.get_setting("git.last_fetch_error") or "")
 
 
 def test_status_before_configure_and_clone(tmp_path, request):
