@@ -23,7 +23,8 @@ For the owner, after this plan:
 No tracking issue: the maintainer's request is the source. The privacyfence-sync features this
 builds on (`run --result-file`, `permissions --json`, rule suggestions in `preflight`) come from
 the PrivacyFence plan `docs/sync-scheduling-support-plan.md` on the `plan/sync-scheduling-support`
-branch of privacyfence/privacyfence (Design D1–D3). The cockpit carries no workaround for their
+branch of privacyfence/privacyfence (Design D1–D3; D4 adds the last-use / last-denial column on
+PrivacyFence's own Settings page, which the Tokens page links to). The cockpit carries no workaround for their
 absence and is tested against a fake `privacyfence-sync`.
 
 ## Current state
@@ -41,7 +42,8 @@ This repository is a skeleton (`main` at 314d050):
   holding only PrivacyFence scoped tokens. Next free ADR number: **0002**.
 - `CHANGELOG.md`: an empty `## [Unreleased]`.
 
-What the cockpit drives (privacyfence/privacyfence at 4daa4f06, `sync/src/privacyfence_sync/`):
+What the cockpit drives (privacyfence/privacyfence at 4daa4f06, line numbers unchanged at `main`
+9ee23a0c; `sync/src/privacyfence_sync/`):
 
 - `cli.py:35-58`: `run RECIPE [--server] [--attended] [--token-env]`, `check RECIPE`,
   `preflight RECIPE [--server] [--attended] [--token-env]`, `login`. Exit codes (`cli.py:121-151`):
@@ -89,6 +91,20 @@ Facts checked in this session:
 
 Everything below is decided. Phases point at these sections by number.
 
+### 0. Worker setup (every phase)
+
+A cloud checkout is shallow and has no tags. Before anything else, run from the repository root:
+
+```bash
+git fetch --unshallow --tags origin
+python3 -m pip install -e ".[dev,test]"
+```
+
+and re-run the install after a phase changes `pyproject.toml`. Every command in this plan uses the
+same interpreter (`python3`). "The definition-of-done commands" means, from the root:
+`python3 -m pytest -v --cov=privacyfence_cockpit --cov-branch --cov-report=term-missing
+--cov-fail-under=95`, `ruff check .`, `python3 -m mypy`, `bandit -c pyproject.toml -r src`.
+
 ### A. Package layout
 
 All under `src/privacyfence_cockpit/`:
@@ -109,19 +125,25 @@ All under `src/privacyfence_cockpit/`:
 | `gitrepo.py` | p4 | `GitManager` |
 | `gitauth.py` | p5 | deploy key, PAT, known hosts, credentials |
 | `venvs.py` | p6 | `VenvManager` |
-| `history.py` | p7, p8 | run rows, queries, CSV, retention |
-| `runner.py` | p7, p8 | `Runner` |
+| `history.py` | p7a, p8 | run rows, queries, CSV, retention |
+| `runner.py` | p7b, p8 | `Runner` |
 | `replay.py`, `checks.py`, `permissions.py` | p8 | live replay, cockpit-side checks, permissions merge |
 | `runlock.py`, `jobs.py`, `scheduler.py` | p9 | file lock, queue and worker, scheduler |
 | `notify.py` | p10 | webhooks, `Notifier` |
 | `token_check.py` | p11 | `privacyfence_status` through MCP |
 | `services.py` | p12 | `Cockpit`: wiring and background loops |
-| `web/` | p13–p18 | app shell (p13), auth (p14), pages (p15–p18), templates, static |
-| `cli.py` | p13, p14, p19 | the `cockpit` command |
+| `web/` | p13a–p18 | static and base templates (p13a), app shell (p13b), auth (p14), pages (p15–p18) |
+| `cli.py` | p13b, p14, p19a, p19b | the `cockpit` command |
 
 Conventions for every phase: Python 3.12 syntax (CI also runs 3.13); mypy strict; `pathlib`;
-subprocesses with a fixed argv, never `shell=True`, each with `# nosec B603` and a reason in the
-style of privacyfence-sync (`transform.py:28`); `import subprocess  # nosec B404  # <reason>`.
+subprocesses with a fixed argv, never `shell=True`. Ruff ignores `# nosec` and bandit ignores
+`# noqa`, so each subprocess call carries both, on the line ruff and bandit report:
+`# noqa: S603, S607  # nosec B603 B607  # <reason>` (`S607`/`B607` only for a bare program name
+such as `"git"`, `"ssh-keyscan"`); `import subprocess  # nosec B404  # <reason>`. Constants that
+look like secrets or a bind-all address carry `# noqa: S105  # nosec B105  # <reason>`
+(`DEFAULT_TOKEN`, `TOKEN_PREFIX`) or `# noqa: S104  # nosec B104  # <reason>` (`listen_host`'s
+default). p1 sets the tests' per-file ignores in `pyproject.toml` to
+`"tests/**" = ["S101", "S103", "S105", "S106", "S108", "S603", "S607"]`.
 No log line, page, notification or exception message carries a token, PAT, deploy key, webhook
 URL, password, setup code (except the one deliberate setup-code log line, §W1) or master key.
 `# pragma: no cover` is allowed only where a section below says so.
@@ -146,7 +168,7 @@ test = ["pytest", "pytest-cov", "pytest-asyncio", "httpx"]
 dev = ["ruff", "mypy", "bandit", "types-PyYAML", "types-croniter"]
 ```
 
-p13 adds `[project.scripts] cockpit = "privacyfence_cockpit.cli:main"` and package data
+p13b adds `[project.scripts] cockpit = "privacyfence_cockpit.cli:main"` and package data
 `privacyfence_cockpit = ["py.typed", "web/templates/*.html", "web/static/*"]`.
 
 ### C. Core types (p1)
@@ -218,15 +240,17 @@ class ListSink: events: list[Event]     # records events; used by tests
 | `PRIVACYFENCE_TOKEN` | `env_token: str \| None` — **popped** from `environ` | None |
 
 `from_environ` raises `ConfigError` (a `ValueError`) with `COCKPIT_LISTEN_PORT must be a number
-between 1 and 65535` or `COCKPIT_PUBLIC_URL must start with http:// or https://`. `EnvConfig.secure_cookies`
+between 1 and 65535`, `COCKPIT_PUBLIC_URL must start with http:// or https://`, or (a set,
+stripped `PRIVACYFENCE_TOKEN` not starting with `pfst_`) `PRIVACYFENCE_TOKEN must be a PrivacyFence
+scoped token (pfst_…)`; the value is never in the message. `EnvConfig.secure_cookies`
 is `public_url is not None and public_url.startswith("https://")`. `__repr__` of `EnvConfig` shows
 `env_token` as `'<set>'` or `None` (dataclass `field(repr=False)` plus a custom `__repr__`).
 
 `paths.py` — `DataPaths(root: Path)`, frozen, with properties `repo = root/"repo"`,
 `venvs = root/"venvs"`, `logs = root/"logs"`, `db_file = root/"cockpit.db"`,
 `secrets = root/"secrets"`, `home = root/"home"`, `run_lock = root/"run.lock"`,
-`git_lock = root/"git.lock"`. `ensure()` creates `root`, `venvs`, `logs`, `secrets`, `home`
-(not `repo`: clone creates it) with mode `0o700` and returns `self`.
+`git_lock = root/"git.lock"`. `ensure()` creates `root`, `venvs`, `logs`, `secrets`, `home`,
+`home/".ssh"` (not `repo`: clone creates it) with mode `0o700` and returns `self`.
 
 ### D. Database (p1)
 
@@ -365,7 +389,11 @@ class Effective:
 def effective(db: Database, config: CockpitConfig, env: EnvConfig) -> Effective
 ```
 
-Precedence: server `cockpit.yaml` > setting `server_url` > `COCKPIT_SERVER_URL` > none. Timezone
+Precedence: server `cockpit.yaml` > setting `server_url` > `COCKPIT_SERVER_URL` > none. The
+cockpit passes it to recipes as `PRIVACYFENCE_MCP_URL`, which privacyfence-sync ranks below a
+recipe's own `server:` (`cli.py:68-69`); a recipe with `server:` therefore talks to that server.
+The Overview shows `server: <url>` under such a recipe's name (from `yaml.safe_load` of its
+`recipe.yaml`), and the docs say token checks always use the effective server. Timezone
 `cockpit.yaml` > setting `timezone` > `"UTC"`. `timeout_minutes` from `cockpit.yaml` (default 60).
 `retention_days` setting, default 90; `fetch_interval_minutes` setting, default 15; `auto_update`
 setting `git.auto_update == "1"`, default False.
@@ -593,8 +621,9 @@ def credentials_factory(db: Database, store: SecretStore, paths: DataPaths) -> C
   look like a GitHub token.")`; stored as `("git", "pat")`.
 - `host_of`: `git@host:path` → `(host, 22)`; `ssh://[user@]host[:port]/path` → `(host, port or 22)`.
 - `scan_host`: argv `["ssh-keyscan", "-T", "10", "-p", str(port), "-t", "ed25519,ecdsa,rsa", host]`
-  with timeout 30; parses lines `host type key` (skipping `#` lines). Empty → `GitError(f"no SSH host
-  keys from {host}:{port}")`. `host` must match `^[A-Za-z0-9.-]+$`.
+  with timeout 30 and the §G1 git env (no credentials); parses lines `host type key` (skipping `#`
+  lines). Empty → `GitError(f"no SSH host keys from {host}:{port}")`. `host` must match
+  `^[A-Za-z0-9][A-Za-z0-9.-]*$` (no leading `-`).
 - `stage_host_keys` stores the keys as JSON in `git.pending_host_keys`; `confirm_host_keys` appends
   their lines to `home/.ssh/known_hosts` (0o600), deletes the setting and returns them.
 - `is_known`: `github.com` on port 22 → True; otherwise True when `home/.ssh/known_hosts` holds a
@@ -606,19 +635,21 @@ def credentials_factory(db: Database, store: SecretStore, paths: DataPaths) -> C
     "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o",
     f"UserKnownHostsFile={home}/.ssh/known_hosts_github {home}/.ssh/known_hosts"])}`.
     No key stored → `GitError("No deploy key: generate one on the Code page.")`.
-  - `git.auth == "https"`: writes `<dir>/secret` (0o600, the PAT) and `<dir>/askpass` (0o700):
-    ```sh
-    #!/bin/sh
-    case "$1" in
-      Username*) echo x-access-token ;;
-      *) cat "$(dirname "$0")/secret" ;;
-    esac
+  - `git.auth == "https"`: writes `<dir>/secret` (0o600, the PAT) and yields a credential helper
+    through git's environment config (no executable file, because `/tmp` is a `noexec` tmpfs):
+    `{"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_KEY_1": "credential.helper", "GIT_CONFIG_VALUE_1": helper}`, where
+    ```python
+    helper = ("!f() { test \"$1\" = get || exit 0; echo username=x-access-token; "
+              f"printf 'password=%s\\n' \"$(cat {shlex.quote(str(secret))})\"; }}; f")
     ```
-    and yields `{"GIT_ASKPASS": "<dir>/askpass"}`. No PAT → `GitError("No access token: add one on
-    the Code page.")`.
+    (the first part is a plain string, so its braces are literal; in the f-string `}}` is one `}`).
+    The empty first value clears any other helper. Checked in this session: `git credential fill`
+    with this environment prints `username=x-access-token` and the file's password. No PAT →
+    `GitError("No access token: add one on the Code page.")`.
   - otherwise yields `{}`.
   Secret material reaches git only as a short-lived file in `/tmp`, never in argv or the
-  environment.
+  environment (the environment carries only the file's path).
 
 ### V. The venv manager (p6)
 
@@ -688,6 +719,13 @@ def make_fake_sync(bin_dir: Path, *, exit_code: int = 0, outcome: str | None = "
                    permissions_json: dict[str, Any] | None = None, record: Path | None = None) -> Path
 ```
 
+The result file it writes follows PrivacyFence plan D1:
+
+```json
+{"version": 1, "recipe": "fixture", "outcome": "no_change", "exit_code": 0, "stopped_at_step": "build",
+ "started_at": "2026-10-20T06:15:00Z", "finished_at": "2026-10-20T06:15:42Z", "privacyfence_sync_version": "0.0.0+fake"}
+```
+
 It writes `bin_dir/"privacyfence-sync"` (0o755) starting `#!{sys.executable}` with the options
 embedded as a JSON literal. Behaviour: `--help` prints a usage line and exits 0; `run --help`
 prints usage including `--result-file` when `help_result_file`; `permissions --help` exits 0 with
@@ -699,9 +737,9 @@ prints usage including `--result-file` when `help_result_file`; `permissions --h
 "cwd": os.getcwd()}` to that file. Tests build a venv-shaped folder (`<venv>/bin/…`, plus
 `.cockpit-ready`) around it instead of running pip.
 
-### R. The runner (p7) and its modes (p8)
+### R. The runner (p7a, p7b) and its modes (p8)
 
-`history.py` (p7):
+`history.py` (p7a):
 
 ```python
 @dataclass(frozen=True)
@@ -729,12 +767,14 @@ class History:
     def mark_orphans(self, now: datetime) -> int
 ```
 
-`finish` computes `duration_seconds` from `started_at`. `mark_orphans`: every `running` row whose
-`pid` is None or not alive (`os.killpg(pid, 0)` raises `ProcessLookupError`) becomes `finished`
-with outcome `failed`, note `the cockpit stopped during this run`. `trigger` filter matches exactly;
+`finish` computes `duration_seconds` from `started_at`. `mark_orphans`: every `running` row becomes
+`finished` with outcome `failed`, note `the cockpit stopped during this run`, and the count is
+returned. Only `serve` (§W2) calls it, after `RunLock.try_acquire()` succeeds (then it releases),
+so no run is active in any process; when `try_acquire()` fails it is skipped. PIDs are never used
+to guess liveness (they are reused after a restart). `trigger` filter matches exactly;
 `since`/`until` are inclusive UTC dates on `started_at`. Order: `started_at DESC, id DESC`.
 
-`runner.py` (p7):
+`runner.py` (p7b):
 
 ```python
 @dataclass(frozen=True) class RunResult: run_id: int; outcome: Outcome; exit_code: int | None; log_path: Path
@@ -743,7 +783,7 @@ class Runner:
                  tokens: TokenResolver, effective: Callable[[], Effective], clock: Callable[[], datetime] = utc_now,
                  kill_grace_seconds: float = 10.0, timeout_unit_seconds: float = 60.0) -> None: ...
     async def run(self, recipe: Recipe, *, mode: Mode, trigger: str, job_id: str | None,
-                  on_line: Callable[[str], None] | None = None) -> RunResult
+                  on_line: Callable[[str], None] | None = None, attended: bool = False) -> RunResult
     def stop(self, run_id: int) -> bool
 ```
 
@@ -757,7 +797,8 @@ class Runner:
 3. argv (`sync = venvs.sync_bin(venv)`, `yaml = recipe.yaml_path`):
    - attended/unattended: `[sync, "run", yaml, "--result-file", result]`, plus `--attended`
      for attended. `result` is `<mkdtemp(prefix="cockpit-run-")>/result.json`, removed afterwards.
-   - preflight: `[sync, "preflight", yaml]`. check: `[sync, "check", yaml]`.
+   - preflight: `[sync, "preflight", yaml]`, plus `--attended` when `run(..., attended=True)`
+     (the parameter `attended: bool = False` affects only preflight). check: `[sync, "check", yaml]`.
    - replay: §R2.
 4. env, exactly: `PATH=f"{venv}/bin:/usr/local/bin:/usr/bin:/bin"`, `HOME=str(paths.home)`,
    `LANG="C.UTF-8"`, `TZ=eff.timezone`, `PRIVACYFENCE_MCP_URL=eff.server_url` (only when set),
@@ -775,6 +816,9 @@ class Runner:
 8. Terminating a group: `os.killpg(pgid, SIGTERM)`; wait `kill_grace_seconds`; still alive →
    `os.killpg(pgid, SIGKILL)`. `ProcessLookupError` is ignored.
 9. `history.finish(...)`, `set_pid(run_id, None)`; footer; return.
+10. `asyncio.CancelledError` while the subprocess runs (the server shutting down): terminate the
+    group as in step 8 (synchronously, polling with `time.sleep` for `kill_grace_seconds`), finish
+    the row as `stopped` with note `the cockpit was shut down`, write the footer, then re-raise.
 
 `stop(run_id)`: `history.request_stop` sets `stop_requested=1` and returns the row; if it is
 `running` with a pid, terminate the group as in step 8 in a background thread
@@ -826,7 +870,9 @@ def cockpit_problems(recipe: Recipe, repo: Path) -> list[str]
 
 The recipe YAML must parse to a mapping (`recipe.yaml is not a YAML mapping`); `work_dir`
 (default `"work"`) must resolve inside the recipe folder (`work_dir {w} is outside the recipe
-folder`); `git -C repo check-ignore -q <work dir relative to repo>` must exit 0; exit 1 →
+folder`); `git -C repo check-ignore -q <work dir relative to repo>/` (with the trailing slash, so
+a `work/` pattern matches a folder that does not exist yet; checked in this session) must exit 0;
+exit 1 →
 `work_dir {rel} is not git-ignored; add it to .gitignore so source data never reaches git`, exit
 128 → `the recipe repository is not a git checkout`. Runner check mode writes each problem to the
 log as `# cockpit check: <problem>` before running `privacyfence-sync check`; any problem makes
@@ -914,6 +960,7 @@ class Job:
     kind: JobKind; trigger: str
     selectors: tuple[str, ...] = (); mode: Mode = Mode.UNATTENDED; repeat: int = 1
     stop_on_error: bool = False; sha: str | None = None
+    attended: bool = False   # passed to Runner.run; only preflight uses it
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     submitted_at: datetime = field(default_factory=utc_now)
 
@@ -981,6 +1028,10 @@ and one `SCHEDULE_MISSED` event with that note as `detail`. Any due-now fire →
 `Job(kind=RUN, trigger=f"schedule:{name}", selectors=s.run, mode=UNATTENDED, repeat=s.repeat,
 stop_on_error=s.stop_on_error)` submitted (a False from `submit` is logged at INFO). Finally
 `last_tick_at = now`. Fires are computed with `croniter(cron, start.astimezone(ZoneInfo(tz)))`.
+Daylight saving: croniter returns a repeated local time twice on the autumn change (checked:
+`30 2 * * *` in Europe/Budapest gives 2026-10-25T00:30Z and 01:30Z), so `fires_between` drops a fire
+whose naive local wall time equals the previous kept fire's; a skipped local time in spring fires
+once at the shifted time (croniter gives 2026-03-29T01:00Z, 03:00 local).
 Paused schedules neither run nor count as missed. Missed runs are never caught up.
 
 ### N. Notifications (p10)
@@ -1034,18 +1085,20 @@ class Notifier:   # implements EventSink
 
 ### W. The web app (p12–p18)
 
-**§W0 Shell contracts (p13).** These let the page phases (p15–p18) run in parallel without
+**§W0 Shell contracts (p13a, p13b).** These let the page phases (p15–p18) run in parallel without
 editing a shared file.
 
 - `web/app.py` builds its routes from `routes_auth`, `routes_runs`, `routes_schedules`,
   `routes_code`, `routes_tokens`, `routes_permissions`, `routes_notifications`, `routes_settings`,
-  in that order, each exposing `ROUTES: list[BaseRoute]`. p13 creates every one of these modules
+  in that order, each exposing `ROUTES: list[BaseRoute]`. p13b creates every one of these modules
   as a stub (`ROUTES: list[BaseRoute] = []`). A page phase edits only its own module, its own
   templates and its own tests.
 - `web/render.py`: `render(request, template: str, context: dict[str, Any], status_code: int = 200)
   -> HTMLResponse` adds `cockpit`, `banners` (§W2), `flash` (read from the cookie and cleared),
-  `csrf_token` (`getattr(request.state, "csrf_token", "")`), `nav` (first path segment) and
-  `version`. `redirect(url: str, flash: str | None = None) -> RedirectResponse` returns a 303 and,
+  `csrf_token` (`getattr(request.state, "csrf_token", "")`), `nav` (first path segment),
+  `version`, and `authenticated` (`getattr(request.state, "authenticated", True)` in p13b; p14 changes
+  the default to `False` and its middleware sets it). `base.html` renders the nav and the banners
+  only when `authenticated`, so `/login` and `/setup` show neither. `redirect(url: str, flash: str | None = None) -> RedirectResponse` returns a 303 and,
   with a flash, sets cookie `cockpit_flash` (urlsafe base64 of the text cut to 300 characters,
   HttpOnly, SameSite=Strict, Path=/, Max-Age=60).
 - Jinja filters registered in `app.py`: `localtime(iso_text, tz) -> "YYYY-MM-DD HH:MM <tz>"`
@@ -1059,7 +1112,7 @@ editing a shared file.
   edit `cockpit.css` or `cockpit.js`.
 - Test helpers: `tests/cockpit_factory.py` (p12) `make_cockpit(tmp_path, *, clock=None,
   environ=None) -> Cockpit` (writes a master key file, sets `COCKPIT_DATA_DIR` and
-  `COCKPIT_MASTER_KEY_FILE` under `tmp_path`); `tests/webclient.py` (p13) `client(cockpit) ->
+  `COCKPIT_MASTER_KEY_FILE` under `tmp_path`); `tests/webclient.py` (p13b) `client(cockpit) ->
   TestClient` over `create_app(cockpit, start_background=False)`, and (p14) `logged_in(cockpit)
   -> tuple[TestClient, str]` that sets a password, logs in and returns the CSRF token.
 
@@ -1084,8 +1137,12 @@ editing a shared file.
   sha256 hex, a per-session `csrf_token` (`token_urlsafe(32)`) and `expires_at` = created + 7 days.
   Cookie flags `HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when `EnvConfig.secure_cookies`,
   `Max-Age=604800`. Password change and reset delete every other session.
-- CSRF: every POST must carry form field `csrf_token` or header `X-CSRF-Token` equal to the
-  session's token (`hmac.compare_digest`); `/login` and `/setup` use a double-submit cookie
+- CSRF: every POST handler starts with `form = await require_csrf(request)` (in `auth.py`), which
+  reads the form, compares its `csrf_token` field or the `X-CSRF-Token` header with the session's
+  token (`hmac.compare_digest`), raises `HTTPException(403, …)` on a mismatch, and returns the
+  `FormData` (no middleware reads the body). p14 adds `tests/test_csrf_routes.py`, which walks every
+  `Route` of `create_app(...)` that accepts POST and asserts a 403 without a token, so routes added
+  by later phases are covered automatically; `/login` and `/setup` use a double-submit cookie
   `cockpit_csrf` (HttpOnly, SameSite=Strict) set on GET. Failure → 403
   `Invalid or missing CSRF token. Reload the page and try again.` `base.html` puts
   `hx-headers='{"X-CSRF-Token": "<token>"}'` on `<body>`.
@@ -1101,7 +1158,7 @@ editing a shared file.
   `Referrer-Policy: same-origin`, `X-Frame-Options: DENY`. htmx's inline indicator style is
   disabled with `<meta name="htmx-config" content='{"includeIndicatorStyles": false}'>`.
 
-**§W2 Services (p12) and the app shell (p13).** `services.py`:
+**§W2 Services (p12) and the app shell (p13a, p13b).** `services.py`:
 
 ```python
 class Cockpit:
@@ -1119,28 +1176,29 @@ class Cockpit:
 ```
 
 `open`: `paths.ensure()`; `load_master_key`; `SecretStore.verify_canary()`; `Database.migrate()`;
-`history.mark_orphans`; `write_builtin_known_hosts`; builds everything with `notifier` as the event
+`write_builtin_known_hosts`; builds everything with `notifier` as the event
 sink. `start()` creates tasks: `worker.run_forever`, `scheduler.run_forever`, `notifier.run_forever`,
 a fetch loop (when `git.status()` reports `configured` and `cloned`: `git.fetch` in a thread every
 `fetch_interval_minutes`, errors logged), a token loop (60 s after start, then hourly: `check_all` when
 `tokens.last_check_at` is unset or 24 h old), a retention loop (daily: `history.prune_logs`).
 `stop()` cancels them.
 
-`web/app.py` (p13): `create_app(cockpit: Cockpit, *, start_background: bool = True) -> Starlette`;
+`web/app.py` (p13b): `create_app(cockpit: Cockpit, *, start_background: bool = True) -> Starlette`;
 `app.state.cockpit`; lifespan runs `cockpit.start()`/`stop()` when `start_background`; mounts
 `/static` (`StaticFiles(packages=[("privacyfence_cockpit.web", "static")])`); routes from each
 `web/routes_*.py` module's `ROUTES: list[BaseRoute]`. `Jinja2Templates` with
 `PackageLoader("privacyfence_cockpit.web", "templates")`, autoescape on.
 
-`web/server.py` (p13): `serve(env: EnvConfig) -> int` configures logging
+`web/server.py` (p13b): `serve(env: EnvConfig) -> int` configures logging
 (`%(asctime)s %(levelname)s %(name)s: %(message)s`, level `env.log_level`), calls `Cockpit.open`
-(a `MasterKeyError` or `ConfigError` → its message on stderr, return 2), issues the setup code if
+(a `MasterKeyError` or `ConfigError` → its message on stderr, return 2), marks orphaned runs as in
+§R (`mark_orphans` under `try_acquire`), issues the setup code if
 needed (p14), and runs `uvicorn.Server(uvicorn.Config(app, host, port, log_config=None,
 proxy_headers=False)).run()` — that one call carries `# pragma: no cover  # needs a real socket`.
 
 `/healthz`: `{"status": "ok"}` 200 when `SELECT 1` succeeds, else `{"status": "error"}` 503.
 
-`web/context.py` (p13): `banners(cockpit) -> list[Banner(level: "info"|"warning"|"error", text: str,
+`web/context.py` (p13b): `banners(cockpit) -> list[Banner(level: "info"|"warning"|"error", text: str,
 link: str | None)]`, rendered on every page by `base.html`, in this order:
 1. `env_token` set: warning `PRIVACYFENCE_TOKEN is set in the container environment: it overrides every stored token.`
 2. Repo not configured: info `No recipe repository yet.` → `/code`.
@@ -1181,7 +1239,7 @@ is appended as the prefix text plus an `<a href=url target="_blank" rel="noopene
 whose `textContent` is the URL; scrolls to the bottom when already at the bottom; on `end` shows
 the outcome in `#run-outcome` and closes the source. No `innerHTML` with log data.
 
-**§W4 Schedules and Code (p16).**
+**§W4 Schedules (p16a) and Code (p16b).**
 
 `web/routes_schedules.py`: `GET /schedules` lists each schedule (name, cron, effective timezone,
 `run` selectors, next fire, paused/active, the last run row with that trigger) and the 20 newest
@@ -1249,11 +1307,11 @@ https://.`, `{field} must be a whole number between {a} and {b}.`), saves, 303 w
 `POST /settings/password`: wrong current → `Wrong password.`; then §W1 rules; success deletes all
 other sessions.
 
-### L. The CLI (p13, p14, p19)
+### L. The CLI (p13b, p14, p19a, p19b)
 
 `cli.py` — `main(argv: list[str] | None = None) -> int`, argparse `prog="cockpit"`,
 `allow_abbrev=False`. Every command builds `Cockpit.open(EnvConfig.from_environ(os.environ))`
-(p13 adds `serve`, p14 `user reset-password`, p19 the rest). Commands that run recipes or
+(p13b adds `serve`, p14 `user reset-password`, p19a the inspecting commands, p19b the recipe-running ones). Commands that run recipes or
 change the checkout hold the run lock (§Q). Exit codes: 0 ok; 1 a usage, recipe, selection or
 validation error; 2 an environment error (master key, config, git, venv); for `run`, the exit code
 of the first recipe whose outcome is not in `SUCCESS_OUTCOMES` (`stopped`/`timed_out` → 2).
@@ -1263,7 +1321,7 @@ of the first recipe whose outcome is not in `SUCCESS_OUTCOMES` (`stopped`/`timed
 | `serve` | §W2 |
 | `list` | per group: the group name, then `  {folder:<32} {label:<14} {when}` (`never` when no run) |
 | `check [PATH…]` | runs mode `check` per recipe, printing the log lines; summary `check: {n} recipe(s), {k} failed` |
-| `preflight [PATH…] [--attended]` | mode `preflight` per recipe; streams lines |
+| `preflight [PATH…] [--attended]` | mode `preflight` per recipe, `Job.attended` from the flag; streams lines |
 | `permissions [PATH…] [--union \| --by-group] [--json]` | `collect` per recipe; text via `render_recipe`/`render_merged`; `--json` prints `{"recipes": [{"recipe", "report", "error"}]}` |
 | `run [PATH…] [--attended] [-n/--dry-run] [--stop-on-error] [--repeat N]` | `--dry-run` prints `would run: {path}` per recipe and runs nothing; else one `Job(RUN, "manual", …)` executed in-process by `Worker.execute` (not through the server's queue) with `on_line` printing; summary line per run `{path}: {label} (exit {code})` |
 | `test [-- ARGS]` | `<venv>/bin/python -m pytest -q ARGS` in `paths.repo`, minimal env without any token; pytest missing in the venv → `Add pytest to requirements.txt to use cockpit test.`, exit 1 |
@@ -1276,7 +1334,8 @@ of the first recipe whose outcome is not in `SUCCESS_OUTCOMES` (`stopped`/`timed
 | `git update` | `git.update()` then `venvs.ensure()`, holding the run lock |
 | `user reset-password` | §W1 |
 
-`check`, `preflight`, `run` and `test --live` all build one `Job(RUN, "manual", selectors=PATHS,
+Every CLI command ends with `asyncio.run(cockpit.notifier.deliver_pending())`, so events it raised
+(a venv failure, a failing fetch) are delivered. `check`, `preflight`, `run` and `test --live` all build one `Job(RUN, "manual", selectors=PATHS,
 mode=…)` and execute it in-process with a `Worker` built with `on_lock_wait` and `on_line` printing
 (`Worker.execute` takes the run lock and builds the venv first). They record history rows with trigger `manual`.
 
@@ -1309,8 +1368,9 @@ requirements/image.lock.txt` and the same for `requirements/build.in` → `requi
 **Fixture recipe repository** `tests/fixtures/recipe-repo/`: `cockpit.yaml` (version 1, timezone
 `UTC`, one schedule `smoke` with cron `0 3 * * *` and `run: [imports]`), `requirements.txt`
 (`-e ./lib/privacyfence-sync-fake`), `.gitignore` (`work/`), `workflows/10-imports/10-fixture/recipe.yaml`
-(version 1, name `fixture`, work_dir `work`, one script step `scripts/hello.py`) with
-`scripts/hello.py`, and `lib/privacyfence-sync-fake/` (`pyproject.toml` with `[project] name =
+(exactly:
+`version: 1`, `name: fixture`, `work_dir: work`, `steps: [{id: hello, run: scripts/hello.py, args: []}]`)
+with `scripts/hello.py` (prints `hello` and exits 0), and `lib/privacyfence-sync-fake/` (`pyproject.toml` with `[project] name =
 "privacyfence-sync"`, version `0.0.0+fake`, `[project.scripts] privacyfence-sync =
 "privacyfence_sync_fake:main"`, setuptools backend; `privacyfence_sync_fake.py` implementing
 `--help`, `run --help` mentioning `--result-file`, `permissions --help` mentioning `--json`, and
@@ -1325,7 +1385,8 @@ and requires exit 0 and `fixture: 1 step(s), OK` in its output; waits up to 120 
 `docker inspect -f '{{.State.Health.Status}}'` to be `healthy`; on failure prints `docker logs`;
 always removes the container and volume (`trap`).
 
-**`.github/workflows/image.yml`**: `on: workflow_dispatch` and `pull_request` with paths
+**`.github/workflows/image.yml`**: `on: workflow_dispatch`, `push` to branches `feature/**`, and
+`pull_request`, the last two with paths
 `Dockerfile`, `.dockerignore`, `src/**`, `pyproject.toml`, `requirements/**`,
 `tests/fixtures/recipe-repo/**`, `scripts/smoke_image.sh`, `.github/workflows/image.yml`;
 `permissions: contents: read`; `concurrency: image-${{ github.ref }}` cancel in progress. Jobs:
@@ -1339,13 +1400,16 @@ build-push with `platforms: linux/arm64`, `push: false`). Pins as in Current sta
 - `on: workflow_dispatch` (inputs `version`, string, required; `dry_run`, boolean, default true)
   and `push: tags: ['v*']`. `concurrency: {group: release, cancel-in-progress: false}`.
   Top-level `permissions: contents: read`.
-- Job `prepare` (`permissions: contents: write`): checkout `ref: main` (dispatch) or the tag (push),
+- Job `prepare` (`permissions: contents: write`, needed only to push the tag on the dispatch path): checkout `ref: main` (dispatch) or the tag (push),
   `fetch-depth: 0`; `python3 scripts/release_check.py` with `VERSION` and `EVENT` from the
   environment (never interpolated into the script): for a dispatch, `--version $VERSION` checks the
   form `^\d+\.\d+\.\d+$`, that `HEAD == origin/main`, that tag `v$VERSION` does not exist and sorts
   after every existing `v*` tag, that `CHANGELOG.md` has a `## [$VERSION]` heading and the
   `## [Unreleased]` section above it is empty; for a tag push, `--tag $GITHUB_REF_NAME` checks the
-  form and that the tagged commit is an ancestor of `origin/main`. Then, for a dispatch with
+  form and that the tagged commit is an ancestor of `origin/main`. Versions compare as
+  `(int, int, int)` tuples; tags not matching `^v\d+\.\d+\.\d+$` are ignored. The script prints
+  `latest=true` or `latest=false` (true when this version is the highest), which the job appends to
+  `$GITHUB_OUTPUT`. Then, for a dispatch with
   `dry_run == false`: `git tag -a v$VERSION -m v$VERSION && git push origin v$VERSION` with
   `GITHUB_TOKEN` (a tag pushed with it starts no workflow, so this run publishes itself; there is no
   second run to collide with). Outputs `version`, `sha`, `publish` (`false` for a dry run).
@@ -1354,7 +1418,7 @@ build-push with `platforms: linux/arm64`, `push: false`). Pins as in Current sta
   setup-qemu, setup-buildx; build amd64 with `load: true` and run `scripts/smoke_image.sh`; login
   to `ghcr.io` with `github.actor` / `secrets.GITHUB_TOKEN`; build-push `linux/amd64,linux/arm64`,
   `push: true`, `build-args: VERSION=<version>`, tags `ghcr.io/privacyfence/privacyfence-cockpit:X.Y.Z`,
-  `:X.Y`, `:latest`; `actions/attest-build-provenance` with `subject-name:
+  `:X.Y`, and `:latest` only when `prepare`'s `latest` output is `true`; `actions/attest-build-provenance` with `subject-name:
   ghcr.io/privacyfence/privacyfence-cockpit`, `subject-digest: ${{ steps.build.outputs.digest }}`,
   `push-to-registry: true`; a step summary with the tags and digest.
 
@@ -1459,7 +1523,9 @@ environment `COCKPIT_PUBLIC_URL` and `COCKPIT_SERVER_URL` with example values, v
 ## Manual steps
 
 Nothing before implementation: every phase builds against fakes and in-process servers. After the
-last merge, three checks the CI cannot do, with step-by-step instructions on the
+last merge, three checks the CI cannot do. ma1 and ma3 need the first release, which can only be
+cut from `main`, so they are ticked after the PR merges (the maintainer asked for them here); ma3
+also needs a privacyfence-sync release with D1 and D3. Step-by-step instructions are on the
 [manual steps page](https://claude.ai/artifact/EBXKfb45hsmFX18ZZjv1j9):
 
 1. Make the GHCR package public after the first release.
@@ -1521,7 +1587,7 @@ final_checks:
   - 'git diff --name-only --diff-filter=A origin/main -- docs/adr lists exactly 0002 to 0007; each is Accepted and has a row in docs/adr/README.md''s index'
   - 'CHANGELOG.md has new lines under "## [Unreleased]" and no new version heading'
   - '.claude/toolkit.yaml lists image.yml and release.yml under ci.dispatchable'
-  - 'The image.yml run on the feature PR is green (amd64 smoke test and arm64 build)'
+  - 'The image.yml run triggered by the push of the feature branch head (push trigger on feature/**) is green: amd64 smoke test and arm64 build'
   - 'grep -rnE "shell=True" src prints nothing'
 phases:
   - id: p1-foundation
@@ -1541,30 +1607,28 @@ phases:
       - tests/test_paths.py
       - tests/test_db.py
     brief: |
-      Read docs/cockpit-v1-plan.md sections A, B, C and D first; they are the spec.
-      Setup: git fetch --unshallow --tags origin; python3 -m venv --upgrade-deps .venv;
-      .venv/bin/python -m pip install -e ".[dev,test]" (after step 1, reinstall).
-      1. pyproject.toml: set `dependencies` and the `test`/`dev` extras exactly as Design §B. Do not add
-         [project.scripts] or package data yet (p13 does).
+      Read docs/cockpit-v1-plan.md sections 0, A, B, C and D first; they are the spec. Do the §0 worker setup.
+      1. pyproject.toml: set `dependencies` and the `test`/`dev` extras exactly as Design §B, and set
+         [tool.ruff.lint.per-file-ignores] "tests/**" to the list in §A. Re-run the §0 install. Do not add
+         [project.scripts] or package data yet (p13b does).
       2. src/privacyfence_cockpit/models.py: Outcome, OUTCOME_LABELS, SUCCESS_OUTCOMES, NOTIFY_OUTCOMES,
          RESULT_FILE_OUTCOMES, EXIT_CODE_OUTCOMES, Mode, utc_now, iso, parse_iso as §C. iso() requires a
          tz-aware datetime (ValueError otherwise) and converts to UTC.
       3. events.py: EventKind, Event, EventSink (typing.Protocol), NullSink, ListSink as §C.
       4. config.py: ConfigError and EnvConfig.from_environ exactly as the §C table, including popping
-         PRIVACYFENCE_TOKEN from the mapping passed in, the secure_cookies property and a __repr__ that
-         never shows the token.
+         PRIVACYFENCE_TOKEN from the mapping passed in, its pfst_ check, the secure_cookies property and a
+         __repr__ that never shows the token. Mark the 0.0.0.0 default as §A says.
       5. paths.py: DataPaths as §C; ensure() uses mkdir(parents=True, exist_ok=True) then chmod 0o700.
       6. db.py: Database as §D: connection pragmas, the lock, migrate() creating schema version 1 verbatim
          (every table and index), DatabaseError for a newer schema, and the setting helpers.
       7. Tests (plain pytest functions, tmp_path, no network): tests/test_models.py (every RESULT_FILE and
          EXIT_CODE mapping, iso/parse_iso round trip, iso rejects naive datetimes); tests/test_events.py
          (ListSink records); tests/test_config.py (defaults, every variable, PRIVACYFENCE_TOKEN popped from
-         the mapping, repr has no token, both ConfigError texts, secure_cookies); tests/test_paths.py (ensure
+         the mapping, repr has no token, all three ConfigError texts, secure_cookies); tests/test_paths.py (ensure
          creates the folders with mode 0o700, repo is not created); tests/test_db.py (migrate twice is a no-op,
          user_version is 1, every table exists, settings get/set/delete, newer schema raises DatabaseError,
          two Database objects on one file see each other's writes).
-      8. Run python3 -m pytest -q --cov=privacyfence_cockpit --cov-branch --cov-fail-under=95, ruff check .,
-         python3 -m mypy, bandit -c pyproject.toml -r src. No CHANGELOG line (p23 writes them).
+      8. Run the definition-of-done commands (§0). No CHANGELOG line (p23 writes them).
       Stop condition: if a version in §B cannot be installed from PyPI, stop with status=blocked and quote pip's error.
     acceptance:
       - 'python3 -m pytest tests/test_models.py tests/test_events.py tests/test_config.py tests/test_paths.py tests/test_db.py -q passes'
@@ -1585,7 +1649,7 @@ phases:
       - tests/test_cockpit_yaml.py
       - tests/test_effective.py
     brief: |
-      Read docs/cockpit-v1-plan.md §E (and §C for EnvConfig, §D for settings keys) and
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §E (and §C for EnvConfig, §D for settings keys) and
       docs/reference/cockpit-architecture.md §5 (layout and ordering).
       1. recipes.py: Recipe, DiscoveryError, SelectionError, discover, group_names, select exactly as §E,
          including the error texts.
@@ -1600,7 +1664,7 @@ phases:
          suffix, group only, unknown, dedup, run order regardless of selector order).
          tests/test_cockpit_yaml.py covers the sample from §E, a missing file, and each invalid case.
          tests/test_effective.py covers every precedence branch.
-      5. Run the definition-of-done commands (as p1 step 8). No CHANGELOG line.
+      5. Run the definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_recipes.py tests/test_cockpit_yaml.py tests/test_effective.py -q passes'
       - 'python3 -m pytest tests/test_recipes.py -q --cov=privacyfence_cockpit.recipes --cov-branch --cov-report=term-missing reports 100% for recipes.py'
@@ -1618,7 +1682,7 @@ phases:
       - tests/test_secrets_store.py
       - tests/test_tokens.py
     brief: |
-      Read docs/cockpit-v1-plan.md §S (and §E for Recipe).
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §S (and §E for Recipe).
       1. crypto.py: MasterKeyError, SecretDecryptError, missing_key_message, load_master_key, encrypt,
          decrypt exactly as §S, using cryptography.hazmat.primitives.ciphers.aead.AESGCM. The key never
          appears in a message or repr.
@@ -1634,7 +1698,7 @@ phases:
          a file copied to another name fails to decrypt; canary created then verified; a different key
          raises MasterKeyError); tests/test_tokens.py (valid names order; suggestion text for "imprts";
          no suggestion clause for "zzz"; pfst_ rule; every resolve branch; env wins).
-      5. Definition-of-done commands. No CHANGELOG line.
+      5. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_crypto.py tests/test_secrets_store.py tests/test_tokens.py -q passes'
       - 'grep -n "AESGCM" src/privacyfence_cockpit/crypto.py matches'
@@ -1650,7 +1714,7 @@ phases:
       - tests/gitutil.py
       - tests/test_gitrepo.py
     brief: |
-      Read docs/cockpit-v1-plan.md §G1 (and §C, §D for DataPaths, settings, events).
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §G1 (and §C, §D for DataPaths, settings, events).
       1. tests/gitutil.py: helpers `make_remote(tmp_path: Path, files: dict[str, str], branch: str = "main")
          -> Path` (creates a work repo, commits with `-c user.name=test -c user.email=test@example.invalid`,
          returns a bare clone `remote.git`) and `push_commit(remote: Path, files: dict[str, str], message: str)
@@ -1669,7 +1733,7 @@ phases:
          git.last_fetch_error and git.failing_since and emits GIT_FETCH_FAILING only once the clock is
          more than 24 h after failing_since (use a fake clock and events.ListSink); a later successful fetch
          clears the state and the notice.
-      4. Definition-of-done commands. No CHANGELOG line.
+      4. Definition-of-done commands (§0). No CHANGELOG line.
       Stop condition: if `git` is older than 2.28 (no `init -b`) in the container, stop with status=blocked.
     acceptance:
       - 'python3 -m pytest tests/test_gitrepo.py -q passes'
@@ -1685,12 +1749,12 @@ phases:
       - src/privacyfence_cockpit/gitauth.py
       - tests/test_gitauth.py
     brief: |
-      Read docs/cockpit-v1-plan.md §G2.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §G2.
       1. src/privacyfence_cockpit/gitauth.py: GITHUB_KNOWN_HOSTS (copy the three lines from §G2 exactly),
          HostKey (fingerprint, known_hosts_line), generate_deploy_key, set_pat, host_of, write_builtin_known_hosts,
          is_known, scan_host, stage_host_keys, confirm_host_keys, credentials_factory, all as §G2. Use
-         cryptography's Ed25519PrivateKey and serialization.PrivateFormat.OpenSSH. The askpass script text is
-         exactly the one in §G2.
+         cryptography's Ed25519PrivateKey and serialization.PrivateFormat.OpenSSH. The https credential helper is
+         exactly the GIT_CONFIG_* environment in §G2 (no executable file: /tmp is noexec in the container).
       2. tests/test_gitauth.py:
          - the three GITHUB_KNOWN_HOSTS fingerprints equal SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU,
            SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM and SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s;
@@ -1700,11 +1764,12 @@ phases:
          - scan_host with an injected `run` returning canned ssh-keyscan output (no network); bad host names rejected;
          - stage/confirm writes known_hosts lines (bracketed form for a non-22 port); is_known;
          - credentials_factory: for ssh yields GIT_SSH_COMMAND naming a key file that exists with mode 0o600 inside
-           the context and is gone after it; for https the askpass script prints x-access-token for "Username for ..."
-           and the PAT otherwise (run it with subprocess) and the folder is removed afterwards; missing key / PAT
+           the context and is gone after it; for https, run real `git credential fill` with the yielded env merged into the §G1 env and stdin
+           "protocol=https\nhost=github.com\n\n": its output has username=x-access-token and password=<the PAT>; the
+           folder is removed afterwards; the yielded env values hold only the secret file's path; missing key / PAT
            raise the §G2 GitError texts; the yielded env never contains the PAT or the private key text;
          - an end-to-end https clone is not tested (no network).
-      3. Definition-of-done commands. No CHANGELOG line.
+      3. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_gitauth.py -q passes'
       - 'grep -n "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" src/privacyfence_cockpit/gitauth.py matches'
@@ -1721,9 +1786,7 @@ phases:
       - tests/test_fakesync.py
       - tests/test_venvs.py
     brief: |
-      Read docs/cockpit-v1-plan.md §V, including "Test fake", and the result-file format in the Goal/Current
-      state sections (fields version, recipe, outcome, exit_code, stopped_at_step, started_at, finished_at,
-      privacyfence_sync_version).
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §V, including "Test fake" and the result-file JSON quoted there.
       1. tests/fakesync.py: make_fake_sync exactly as §V, plus `install_fake_venv(paths: DataPaths, db: Database,
          **fake_kwargs) -> Path` that creates paths.venvs/"fake"/bin/privacyfence-sync via make_fake_sync, writes
          paths.venvs/"fake"/".cockpit-ready" and sets the setting venv.current to "fake". tests/test_fakesync.py
@@ -1740,54 +1803,73 @@ phases:
          refuses a fake without --result-file and one without permissions (GATE_MESSAGE, previous venv kept,
          VENV_FAILED emitted once per hash via ListSink, venv.last_error set); pip failure message; pruning keeps
          current + two previous.
-      4. Definition-of-done commands. No CHANGELOG line.
+      4. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_fakesync.py tests/test_venvs.py -q passes'
       - 'grep -n "pin the first version with run --result-file and permissions" src/privacyfence_cockpit/venvs.py matches'
       - 'python3 -m mypy passes'
 
-  - id: p7-runner
-    title: Run history and the runner (subprocess, process group, stop, timeout, outcome, log)
-    depends_on: [p3-secrets-tokens, p4-git-manager, p6-venvs]
-    complexity: M
+  - id: p7a-history
+    title: Run history rows, queries and orphan handling
+    depends_on: [p1-foundation]
+    complexity: S
     touches:
       - src/privacyfence_cockpit/history.py
-      - src/privacyfence_cockpit/runner.py
       - tests/test_history.py
+    brief: |
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §R (the history.py part, not §R2) and §C, §D.
+      1. history.py: RunRow, HistoryFilter, History with every method in §R (not export_csv/prune_logs; p8 adds them).
+         mark_orphans marks every running row, with no pid check (§R says why).
+      2. tests/test_history.py: start/finish/duration, set_pid, query with each filter alone and combined, order
+         (started_at DESC, id DESC), pagination, count, last_by_recipe ignores running rows and missed rows,
+         record_missed (recipe_path NULL, outcome missed, note), request_stop returns the row and sets the flag,
+         mark_orphans finishes every running row as failed with the §R note and returns the count.
+      3. Definition-of-done commands (§0). No CHANGELOG line.
+    acceptance:
+      - 'python3 -m pytest tests/test_history.py -q passes'
+      - 'python3 -m pytest tests/test_history.py -q --cov=privacyfence_cockpit.history --cov-branch --cov-report=term-missing reports 100% for history.py'
+      - 'python3 -m mypy passes'
+
+  - id: p7b-runner
+    title: The runner (subprocess, process group, stop, timeout, cancellation, outcome, log)
+    depends_on: [p3-secrets-tokens, p4-git-manager, p6-venvs, p7a-history]
+    complexity: M
+    touches:
+      - src/privacyfence_cockpit/runner.py
       - tests/test_runner.py
     brief: |
-      Read docs/cockpit-v1-plan.md §R (up to, not including, §R2) and §C, §D, §S, §V.
-      1. history.py: RunRow, HistoryFilter, History with every method in §R (not export_csv/prune_logs; p8).
-      2. runner.py: RunResult and Runner.run / Runner.stop exactly as §R steps 1–9, for modes attended,
-         unattended, preflight and check. Mode replay raises NotImplementedError("p8") for now (p8 replaces it;
-         cover it with one test that p8 will rewrite). Use asyncio.create_subprocess_exec with
-         start_new_session=True; read stdout line by line; enforce the timeout with asyncio.wait_for around the
-         read-and-wait coroutine; terminate with os.killpg SIGTERM, wait kill_grace_seconds, then SIGKILL.
-         The log header/footer lines are verbatim from §R.
-      3. tests/test_history.py: start/finish/duration, query filters and order, count, last_by_recipe,
-         record_missed, request_stop, mark_orphans (dead pid → failed with the note; live pid left alone; use
-         os.getpid() of a sleeping child for "live").
-      4. tests/test_runner.py with tests/fakesync.py's install_fake_venv and record=, a real git checkout from
-         tests/gitutil.py (or git init in tmp_path) and a recipe folder: argv for each mode; env is exactly the §R
-         step 4 keys (assert no other key, token present only when stored, PRIVACYFENCE_MCP_URL only when a server
-         URL is effective); cwd is the recipe folder; outcome from the result file for every outcome string; missing
-         result file → failed; preflight/check outcome from exit code; timeout → timed_out (construct the Runner with
-         timeout_unit_seconds=0.05 and an Effective with timeout_minutes=1, and a fake that sleeps 2 s); stop() from a second task →
-         stopped, process group gone; no venv → failed with the §R step 2 line and no subprocess; header/footer
-         contents; the token value never appears in the log file.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §R (up to, not including, §R2) and §C, §D, §S, §V.
+      1. runner.py: RunResult and Runner.run / Runner.stop exactly as §R steps 1–10, for modes attended,
+         unattended, preflight (with the attended flag) and check. Mode replay raises NotImplementedError("p8")
+         for now; p8 replaces it and its test. Use asyncio.create_subprocess_exec with start_new_session=True;
+         read stdout line by line; enforce the timeout with asyncio.wait_for around the read-and-wait coroutine;
+         terminate with os.killpg SIGTERM, wait kill_grace_seconds, then SIGKILL. Header/footer lines verbatim from §R.
+      2. tests/test_runner.py with tests/fakesync.py's install_fake_venv (record=) and a recipe folder inside a
+         `git init` checkout in tmp_path:
+         - argv for each mode, including preflight with attended=True;
+         - env is exactly the §R step 4 keys (assert no other key; token only when stored; PRIVACYFENCE_MCP_URL only
+           when a server URL is effective); cwd is the recipe folder;
+         - outcome from the result file for each of the six outcome strings; missing result file → failed;
+           preflight/check outcome from the exit code;
+         - timeout → timed_out: Runner(timeout_unit_seconds=0.05) with timeout_minutes=1 and a fake sleeping 2 s;
+         - stop() from a second task → stopped, and os.killpg(pgid, 0) then raises ProcessLookupError;
+         - cancelling the task running run() → row stopped with note "the cockpit was shut down", group gone,
+           CancelledError re-raised;
+         - no venv → failed with the §R step 2 line and no subprocess (the record file stays absent);
+         - header/footer contents; the token value never appears in the log file.
          Use kill_grace_seconds=0.5 and fake sleeps of at most 2 s.
-      5. Definition-of-done commands. No CHANGELOG line.
-      Stop condition: if a timeout or stop test leaves a process behind (check with os.killpg(pgid, 0) in the test),
-      fix the runner, never the test; if that cannot be made reliable, stop with status=blocked.
+      3. Definition-of-done commands (§0). No CHANGELOG line.
+      Stop condition: if a timeout, stop or cancel test leaves a process behind, fix the runner, never the test;
+      if that cannot be made reliable, stop with status=blocked.
     acceptance:
-      - 'python3 -m pytest tests/test_history.py tests/test_runner.py -q passes'
+      - 'python3 -m pytest tests/test_runner.py -q passes'
       - 'python3 -m pytest tests/test_runner.py -q --cov=privacyfence_cockpit.runner --cov-branch --cov-report=term-missing reports at least 95% for runner.py'
       - 'grep -n "start_new_session=True" src/privacyfence_cockpit/runner.py matches'
       - 'python3 -m mypy passes'
 
   - id: p8-run-modes
     title: Live replay, cockpit-side checks, permissions collection and merge, CSV export and log retention
-    depends_on: [p7-runner]
+    depends_on: [p7b-runner]
     complexity: M
     touches:
       - src/privacyfence_cockpit/replay.py
@@ -1801,7 +1883,7 @@ phases:
       - tests/test_runner.py
       - tests/test_history.py
     brief: |
-      Read docs/cockpit-v1-plan.md §R2, including the permissions --json shape it quotes.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §R2, including the permissions --json shape it quotes.
       1. replay.py: REPLAY_ALLOWLIST (the ten tools in §R2, exactly), REPLAY_FILE, cut_replay.
       2. checks.py: cockpit_problems with the §R2 texts.
       3. runner.py: add `command_env(recipe) -> tuple[Path, dict[str, str]] | None` (the venv and the §R step 4
@@ -1812,13 +1894,14 @@ phases:
       5. history.py: CSV_COLUMNS, export_csv, prune_logs.
       6. Tests: tests/test_replay.py (cut at the first non-allowlisted tool; run/template steps before it kept; all
          read-only recipe kept whole; first step writes → None and no file); tests/test_checks.py (ignored work
-         dir ok; not ignored; default "work"; outside the folder; not a git repo); tests/test_permissions.py
+         dir ok, including a work dir that does not exist yet with a `work/` pattern; not ignored; default "work";
+         outside the folder; not a git repo); tests/test_permissions.py
          (collect with the fake's permissions_json, an exit 4, and no venv; merge union and by group with duplicate
          rules across recipes, value None rules, suggested_rules null → unsuggested; exact rendered lines);
          extend tests/test_runner.py (replay argv and env, file deleted after a failing run, check mode problem →
          recipe_error); extend tests/test_history.py (CSV header and rows; prune_logs removes old day folders and
          old venv logs only).
-      7. Definition-of-done commands. No CHANGELOG line.
+      7. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_replay.py tests/test_checks.py tests/test_permissions.py tests/test_runner.py tests/test_history.py -q passes'
       - 'python3 -c "from privacyfence_cockpit.replay import REPLAY_ALLOWLIST as A; assert len(A) == 10 and \"grist_get_records\" in A" passes'
@@ -1838,11 +1921,13 @@ phases:
       - tests/test_jobs.py
       - tests/test_scheduler.py
     brief: |
-      Read docs/cockpit-v1-plan.md §Q (and §R, §G1, §V for what the worker calls).
-      1. runlock.py: RunLock as §Q (fcntl.flock LOCK_EX, LOCK_NB for try_acquire).
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §Q (and §R, §G1, §V for what the worker calls).
+      1. runlock.py: RunLock as §Q (fcntl.flock LOCK_EX; acquire(on_wait) tries LOCK_NB first, calls on_wait when busy,
+         then blocks).
       2. jobs.py: JobKind, Job, JobSummary, JobQueue (dedupe of schedule triggers over queued + running; cancel
          queued only; an asyncio.Condition or asyncio.Queue plus a list for snapshots), Worker.execute and
-         run_forever exactly as §Q, including auto-update before scheduled runs, venvs.ensure, selection errors
+         run_forever exactly as §Q (constructor parameters on_lock_wait and on_line; Job.attended passed to
+         Runner.run), including auto-update before scheduled runs, venvs.ensure, selection errors
          recorded as one recipe_error row, repeat-while-ok, stop_on_error, and RUN_FAILED dedupe per (recipe,
          outcome) per job for schedule triggers only.
       3. scheduler.py: TICK_SECONDS, MISSED_AFTER_SECONDS, next_fire, fires_between, schedules_for, Scheduler
@@ -1854,14 +1939,16 @@ phases:
            repeat 3 with no_change → 1 run; stop_on_error skips later recipes and without it they run; RUN_FAILED
            emitted for a schedule trigger once per (recipe, outcome) and never for "manual"; unknown selector →
            recipe_error row with the SelectionError note; dedupe of a schedule job already queued and already
-           running; cancel; GIT_UPDATE/GIT_PIN/GIT_TRACK/GIT_CLONE against tests/gitutil.py remotes; a GitError
+           running; cancel; on_lock_wait is called when a subprocess holds the lock; GIT_UPDATE/GIT_PIN/GIT_TRACK/GIT_CLONE against tests/gitutil.py remotes; a GitError
            becomes JobSummary.error; auto_update before a scheduled run fast-forwards and is skipped when pinned.
          - tests/test_scheduler.py with a fake clock (a list-backed callable) and Europe/Budapest: first tick ever
            fires nothing and misses nothing; a fire inside the window submits one job with the schedule's repeat and
            stop_on_error; paused schedule neither fires nor is missed; restart after 3 days → one missed row and one
-           SCHEDULE_MISSED with the note's count, and no job; two fires in one tick → one job; DST change day
-           (2026-10-25 in Europe/Budapest) fires once at the local time; cockpit.yaml error → no jobs, last_tick moves.
-      5. Definition-of-done commands. No CHANGELOG line.
+           SCHEDULE_MISSED with the note's count, and no job; two fires in one tick → one job; daylight saving per §Q:
+           fires_between for cron "30 2 * * *" in Europe/Budapest over 2026-10-24T12:00Z..2026-10-26T00:00Z returns exactly
+           [2026-10-25T00:30Z], and over 2026-03-28T12:00Z..2026-03-30T00:00Z returns [2026-03-29T01:00Z, 2026-03-30T00:30Z];
+           cockpit.yaml error → no jobs, last_tick moves.
+      5. Definition-of-done commands (§0). No CHANGELOG line.
       Stop condition: if a worker test needs real time beyond a few seconds, the design is being bypassed; stop with status=blocked.
     acceptance:
       - 'python3 -m pytest tests/test_runlock.py tests/test_jobs.py tests/test_scheduler.py -q passes'
@@ -1876,7 +1963,7 @@ phases:
       - src/privacyfence_cockpit/notify.py
       - tests/test_notify.py
     brief: |
-      Read docs/cockpit-v1-plan.md §N (and §C for Event).
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §N (and §C for Event).
       1. notify.py: WebhookFormat, Webhook, message_for, link_for, build_request, Notifier exactly as §N, with the
          exact message texts. emit() appends to a queue.SimpleQueue so it is safe from threads; deliver_pending
          drains it and POSTs with httpx2.AsyncClient(timeout=10, transport=self._transport).
@@ -1885,7 +1972,7 @@ phases:
          link_for with and without a public URL; the three body formats and ntfy headers; a 500 and a transport
          exception set last_status ("HTTP 500", "error: ConnectError") and do not raise; caplog never contains the URL;
          send_test returns the status text; emit from a thread then deliver_pending sends it.
-      3. Definition-of-done commands. No CHANGELOG line.
+      3. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_notify.py -q passes'
       - 'python3 -m pytest tests/test_notify.py -q --cov=privacyfence_cockpit.notify --cov-branch --cov-report=term-missing reports 100% for notify.py'
@@ -1899,7 +1986,7 @@ phases:
       - src/privacyfence_cockpit/token_check.py
       - tests/test_token_check.py
     brief: |
-      Read docs/cockpit-v1-plan.md §T and §T1, and privacyfence/privacyfence sync/src/privacyfence_sync/client.py
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §T and §T1, and privacyfence/privacyfence sync/src/privacyfence_sync/client.py
       lines 65-110 (the pattern to copy).
       1. token_check.py: STATUS_REASON, TokenState, TokenCheck, fetch_status, classify, TokenChecker exactly as §T,
          including the error texts and the notice keys token:<name>:invalid and token:<name>:<threshold>.
@@ -1909,7 +1996,7 @@ phases:
          days_left 13 and key 14; a second check at 13 days → nothing; 6 days → key 7; refused twice → one
          TOKEN_INVALID; ok after refused clears the invalid key; forget() deletes the row and the notices;
          check_all sets tokens.last_check_at.
-      3. Definition-of-done commands. No CHANGELOG line.
+      3. Definition-of-done commands (§0). No CHANGELOG line.
       Stop condition: if MCPServer, TransportSecuritySettings or streamable_http_client do not exist as §T1 shows in
       the installed mcp, stop with status=blocked (do not mock the MCP client).
     acceptance:
@@ -1926,7 +2013,7 @@ phases:
       - tests/cockpit_factory.py
       - tests/test_services.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W2 (the services.py part) and §W0's test-helper line.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W2 (the services.py part) and §W0's test-helper line.
       1. services.py: Cockpit with every attribute and method in §W2. open() does the start-up sequence in §W2 in
          that order and wires notifier as the EventSink of git, venvs, scheduler, worker and token_checker; the git
          manager gets gitauth.credentials_factory. start() creates the six loops (worker, scheduler, notifier, fetch,
@@ -1939,15 +2026,49 @@ phases:
          MasterKeyError; recipes() and config_or_default() on a repo with a broken cockpit.yaml; effective(); start()
          then stop() leaves no task running; the fetch loop calls git.fetch when cloned (monkeypatch); the token loop
          calls check_all when last_check_at is 25 h old and not when 1 h old.
-      4. Definition-of-done commands. No CHANGELOG line.
+      4. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_services.py -q passes'
       - 'python3 -m pytest -q --cov=privacyfence_cockpit --cov-branch --cov-fail-under=95 passes'
       - 'python3 -m mypy passes'
 
-  - id: p13-web-shell
-    title: Starlette app shell, render helpers, static files, health check, banners and cockpit serve
-    depends_on: [p12-services]
+  - id: p13a-web-static
+    title: Vendored htmx, the stylesheet, the log-streaming script, and the base templates
+    depends_on: [p1-foundation]
+    complexity: M
+    touches:
+      - src/privacyfence_cockpit/web/static/**
+      - src/privacyfence_cockpit/web/templates/base.html
+      - src/privacyfence_cockpit/web/templates/_macros.html
+      - tests/test_web_static.py
+    brief: |
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W0, §W2 (base.html, static files) and §W3's cockpit.js paragraph.
+      1. src/privacyfence_cockpit/web/static/htmx.min.js: `curl -sSfL -o /tmp/htmx.tgz
+         https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.4.tgz`; check `sha256sum /tmp/htmx.tgz` is
+         a34988d1b9f005a458d593aa8d7486537cb878b8ac3b82703db1268983123ecc; extract package/dist/htmx.min.js; check its
+         sha256 is e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447; copy it unchanged.
+      2. cockpit.css with every class in §W0 and §W2 (light palette on :root; dark under prefers-color-scheme: dark).
+      3. cockpit.js: the §W3 log streamer (EventSource on #log[data-events], text nodes, approval-link lines as <a>
+         built with createElement, auto-scroll, end event fills #run-outcome). No innerHTML.
+      4. templates/base.html (the §W2 nav, banners and flash rendered only when `authenticated`, the htmx-config meta,
+         body hx-headers with csrf_token, <script src> tags for htmx.min.js and cockpit.js, blocks `title` and
+         `content`, no inline script or style) and templates/_macros.html (chip, post_button, field_error per §W0).
+         The variables they use are exactly those render() provides in §W0 (cockpit, banners, flash, csrf_token, nav,
+         version, authenticated).
+      5. tests/test_web_static.py: the vendored file's sha256; no "<script>" without src and no style= attribute or
+         <style> in templates (regex over the files); cockpit.css defines every class name listed in §W0; cockpit.js has
+         no "innerHTML"; render base.html with a plain jinja2.Environment(PackageLoader-equivalent FileSystemLoader)
+         and a minimal context, authenticated False → no nav; True → nav links of §W2.
+      6. Definition-of-done commands (§0). No CHANGELOG line.
+      Stop condition: if either sha256 differs, stop with status=blocked; never vendor an unverified file.
+    acceptance:
+      - 'python3 -m pytest tests/test_web_static.py -q passes'
+      - 'sha256sum src/privacyfence_cockpit/web/static/htmx.min.js prints e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447'
+      - 'grep -rn "innerHTML" src/privacyfence_cockpit/web/static/cockpit.js prints nothing'
+
+  - id: p13b-web-app
+    title: Starlette app shell, render helpers, banners, health check, route stubs and cockpit serve
+    depends_on: [p12-services, p13a-web-static]
     complexity: M
     touches:
       - pyproject.toml
@@ -1958,50 +2079,39 @@ phases:
       - src/privacyfence_cockpit/web/context.py
       - src/privacyfence_cockpit/web/server.py
       - src/privacyfence_cockpit/web/routes_*.py
-      - src/privacyfence_cockpit/web/templates/base.html
-      - src/privacyfence_cockpit/web/templates/_macros.html
       - src/privacyfence_cockpit/web/templates/home_placeholder.html
-      - src/privacyfence_cockpit/web/static/**
       - tests/webclient.py
-      - tests/test_web_shell.py
+      - tests/test_web_app.py
       - tests/test_cli_serve.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W0, §W2 (app.py, server.py, context.py, base.html, static, /healthz) and §W3's
-      cockpit.js paragraph.
-      1. pyproject.toml: add [project.scripts] cockpit = "privacyfence_cockpit.cli:main" and package data
-         ["py.typed", "web/templates/*.html", "web/static/*"].
-      2. Static files in src/privacyfence_cockpit/web/static/:
-         - htmx.min.js: `curl -sSfL -o /tmp/htmx.tgz https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.4.tgz`,
-           check `sha256sum /tmp/htmx.tgz` is a34988d1b9f005a458d593aa8d7486537cb878b8ac3b82703db1268983123ecc,
-           extract package/dist/htmx.min.js, check its sha256 is
-           e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447, copy it unchanged.
-         - cockpit.css with every class listed in §W0 and §W2 (light palette, dark under prefers-color-scheme).
-         - cockpit.js: the §W3 log streamer (EventSource, approval-link lines, no innerHTML).
-      3. web/render.py, web/context.py (Banner, banners() with the eight banners in §W2 order and texts), web/app.py
-         (create_app, the Jinja environment with the filters in §W0, StaticFiles, GET /healthz, a temporary GET /
-         that renders home_placeholder.html — p15 replaces it; the routes_* stubs listed in §W0), web/server.py
-         (serve, with the one allowed pragma), templates base.html (nav, banners, flash, the htmx-config meta, body
-         hx-headers with the csrf token, scripts htmx.min.js and cockpit.js, no inline script/style) and _macros.html.
-         Create every stub module routes_auth.py, routes_runs.py, routes_schedules.py, routes_code.py, routes_tokens.py,
-         routes_permissions.py, routes_notifications.py, routes_settings.py with `ROUTES: list[BaseRoute] = []`.
-      4. cli.py: main(argv) with argparse prog "cockpit" and the `serve` subcommand calling web.server.serve; unknown
-         subcommands exit 1 via argparse's SystemExit handled like privacyfence-sync's cli.main.
-      5. tests/webclient.py: client(cockpit) per §W0. tests/test_web_shell.py: /healthz 200 and 503 (closed db); static
-         htmx.min.js served and its sha256 equals the value above; every banner condition renders its text; flash
-         cookie round trip; filters; CSP header absent is fine here (p14 adds it). tests/test_cli_serve.py: serve with
-         a missing master key returns 2 and prints the §S message (monkeypatch uvicorn so nothing binds).
-      6. Definition-of-done commands. No CHANGELOG line.
-      Stop condition: if the npm tarball's sha256 differs, stop with status=blocked; never vendor an unverified file.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W0 and §W2 (app.py, server.py, context.py, /healthz).
+      1. pyproject.toml: [project.scripts] cockpit = "privacyfence_cockpit.cli:main" and package data
+         ["py.typed", "web/templates/*.html", "web/static/*"]; re-run the §0 install.
+      2. web/render.py (render, redirect, the flash cookie, `authenticated` defaulting to True for now), web/context.py
+         (Banner and banners() with the eight banners in §W2, in order, with their texts), web/app.py (create_app,
+         Jinja environment with the §W0 filters, StaticFiles, GET /healthz, a temporary GET / rendering
+         home_placeholder.html that p15 removes, the route modules in §W0 order), and every stub module
+         routes_auth.py, routes_runs.py, routes_schedules.py, routes_code.py, routes_tokens.py, routes_permissions.py,
+         routes_notifications.py, routes_settings.py with `ROUTES: list[BaseRoute] = []`.
+      3. web/server.py: serve() as §W2, including mark_orphans under RunLock.try_acquire and the one allowed pragma.
+         (p14 adds the setup code.)
+      4. cli.py: main(argv) with argparse prog "cockpit" and the `serve` subcommand; argparse's SystemExit is turned
+         into a return code as privacyfence-sync's cli.main does.
+      5. tests/webclient.py: client(cockpit) per §W0. tests/test_web_app.py: /healthz 200, and 503 after
+         cockpit.db.close(); the static htmx file is served; each of the eight banner conditions renders its text;
+         flash cookie round trip; the three filters. tests/test_cli_serve.py: serve with a missing master key returns 2
+         and prints the §S message; serve marks orphaned rows only when the run lock is free (hold it from a subprocess
+         for the negative case); monkeypatch uvicorn.Server.run so nothing binds.
+      6. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_web_shell.py tests/test_cli_serve.py -q passes'
-      - 'sha256sum src/privacyfence_cockpit/web/static/htmx.min.js prints e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447'
-      - 'grep -rn "<script>" src/privacyfence_cockpit/web/templates prints nothing'
-      - 'grep -n "innerHTML" src/privacyfence_cockpit/web/static/cockpit.js prints nothing'
+      - 'python3 -m pytest tests/test_web_app.py tests/test_cli_serve.py -q passes'
+      - 'ls src/privacyfence_cockpit/web/routes_*.py | wc -l prints 8'
       - 'python3 -m mypy passes'
+      - 'python3 -m pytest -q --cov=privacyfence_cockpit --cov-branch --cov-fail-under=95 passes'
 
   - id: p14-web-auth
     title: Password setup with a one-time code, login, sessions, CSRF, throttling and security headers
-    depends_on: [p13-web-shell]
+    depends_on: [p13b-web-app]
     complexity: M
     worker_model: opus
     worker_model_reason: Security-sensitive authentication code (password hashing, session and CSRF handling, the setup-code bootstrap and throttling); a mistake here is the trust boundary of the whole container, and the review of edge cases benefits from the stronger model.
@@ -2009,24 +2119,33 @@ phases:
       - src/privacyfence_cockpit/web/auth.py
       - src/privacyfence_cockpit/web/routes_auth.py
       - src/privacyfence_cockpit/web/app.py
+      - src/privacyfence_cockpit/web/render.py
       - src/privacyfence_cockpit/web/server.py
       - src/privacyfence_cockpit/web/templates/login.html
       - src/privacyfence_cockpit/web/templates/setup.html
       - src/privacyfence_cockpit/cli.py
       - tests/webclient.py
       - tests/test_web_auth.py
+      - tests/test_csrf_routes.py
       - tests/test_cli_user.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W1 completely, and §W0.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W1 completely, and §W0.
       1. web/auth.py: hash_password, verify_password, new_setup_code, check_setup_code, sessions (create, lookup,
-         delete_all_except, expiry), LoginThrottle, the AuthMiddleware and SecurityHeadersMiddleware exactly as §W1
-         (pure ASGI or BaseHTTPMiddleware; set request.state.csrf_token for authenticated requests).
+         delete_all_except, expiry), LoginThrottle, require_csrf, AuthMiddleware and SecurityHeadersMiddleware exactly
+         as §W1. Both middlewares are pure ASGI classes and never read the request body; AuthMiddleware sets
+         request.state.authenticated, request.state.session_id and request.state.csrf_token. CSRF is checked only by
+         require_csrf, which every POST handler calls first (login and setup check the double-submit cookie inside it
+         when there is no session).
       2. web/routes_auth.py: ROUTES for GET/POST /setup, GET/POST /login, POST /logout with the exact messages.
          Templates login.html and setup.html extend base.html.
-      3. web/app.py: add the two middlewares (security headers outermost).
+      3. web/app.py: add the two middlewares (security headers outermost). web/render.py: `authenticated` now
+         defaults to False.
       4. web/server.py: on start with no password, issue a setup code and log the one §W1 WARNING line.
       5. cli.py: `user reset-password` per §W1 (prints the code; never logs it elsewhere).
-      6. tests/webclient.py: add logged_in(cockpit) per §W0.
+      6. tests/webclient.py: add logged_in(cockpit) per §W0. tests/test_csrf_routes.py: build create_app over
+         make_cockpit, log in, then for every starlette Route in app.routes whose methods include POST, POST to its path
+         (path parameters filled with "x") without a token and assert 403; this test stays generic so later phases'
+         routes are covered by it.
       7. tests/test_web_auth.py: hash format and verify; wrong password; GET / redirects to /setup with no password and
          to /login after; setup with wrong code, mismatch, short password, success (code consumed, session cookie set
          with HttpOnly, SameSite=Strict, Secure only when COCKPIT_PUBLIC_URL is https); /setup after a password → 303
@@ -2035,9 +2154,9 @@ phases:
          deletes the session; security headers on a page and on /healthz; /healthz and /static need no login; the setup
          code appears in caplog exactly once and nowhere in responses except as typed. tests/test_cli_user.py:
          reset-password clears the hash and every session and prints a code that then works on /setup.
-      8. Definition-of-done commands. No CHANGELOG line.
+      8. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_web_auth.py tests/test_cli_user.py -q passes'
+      - 'python3 -m pytest tests/test_web_auth.py tests/test_csrf_routes.py tests/test_cli_user.py -q passes'
       - 'grep -n "n=2\*\*15\|n=32768" src/privacyfence_cockpit/web/auth.py matches'
       - 'grep -n "compare_digest" src/privacyfence_cockpit/web/auth.py matches'
       - 'python3 -m mypy passes'
@@ -2058,9 +2177,9 @@ phases:
       - src/privacyfence_cockpit/web/app.py
       - tests/test_web_runs.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W3 and §W0.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W3 and §W0.
       1. web/routes_runs.py: every route in the §W3 table, using render/redirect from web/render.py and the queue,
-         history and runner on request.app.state.cockpit. The SSE endpoint is a StreamingResponse over an async
+         history and runner on request.app.state.cockpit. Every POST handler starts with `form = await require_csrf(request)`. The SSE endpoint is a StreamingResponse over an async
          generator; poll interval and ping interval are module constants (LOG_POLL_SECONDS = 0.5, PING_SECONDS = 15)
          that tests monkeypatch.
       2. Templates overview.html, job.html, job_rows.html, run.html, history.html (use _macros.html and only §W0 classes).
@@ -2070,45 +2189,59 @@ phases:
          mode and redirects to /jobs/<id>; job rows fragment; cancel; run page shows token source and never a token
          value; SSE stream of a finished run yields every log line and an end event; a running run's stream picks up
          appended lines; a deleted log yields the retention line; stop calls runner.stop; history filters each narrow
-         the rows and pagination works; runs.csv headers equal CSV_COLUMNS; every POST without CSRF is 403.
-      5. Definition-of-done commands. No CHANGELOG line.
+         the rows and pagination works; runs.csv headers equal CSV_COLUMNS.
+      5. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_web_runs.py -q passes'
+      - 'python3 -m pytest tests/test_web_runs.py tests/test_csrf_routes.py -q passes'
       - 'test ! -e src/privacyfence_cockpit/web/templates/home_placeholder.html'
       - 'python3 -m mypy passes'
 
-  - id: p16-web-schedules-code
-    title: Schedules page and the Code page (commit browser, update model, credentials, host keys)
+  - id: p16a-web-schedules
+    title: Schedules page
+    depends_on: [p14-web-auth]
+    complexity: S
+    touches:
+      - src/privacyfence_cockpit/web/routes_schedules.py
+      - src/privacyfence_cockpit/web/templates/schedules.html
+      - tests/test_web_schedules.py
+    brief: |
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W4 (schedules part), §Q (scheduler) and §W0.
+      1. web/routes_schedules.py: the §W4 schedule routes and texts; every POST handler starts with
+         `form = await require_csrf(request)`.
+      2. templates/schedules.html.
+      3. tests/test_web_schedules.py with logged_in(): list with next fire (effective timezone) and paused state;
+         pause/resume persist in schedule_state; Run now submits a manual job with the schedule's selectors, repeat and
+         stop_on_error; unknown name 404; a cockpit.yaml error is shown instead of the table; the 20 newest missed rows.
+      4. Definition-of-done commands (§0). No CHANGELOG line.
+    acceptance:
+      - 'python3 -m pytest tests/test_web_schedules.py tests/test_csrf_routes.py -q passes'
+      - 'python3 -m mypy passes'
+
+  - id: p16b-web-code
+    title: Code page (commit browser, update model, credentials, host keys)
     depends_on: [p14-web-auth]
     complexity: M
     touches:
-      - src/privacyfence_cockpit/web/routes_schedules.py
       - src/privacyfence_cockpit/web/routes_code.py
-      - src/privacyfence_cockpit/web/templates/schedules.html
       - src/privacyfence_cockpit/web/templates/code.html
       - src/privacyfence_cockpit/web/templates/commit.html
       - src/privacyfence_cockpit/web/templates/diff.html
-      - tests/test_web_schedules.py
       - tests/test_web_code.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W4, §W4a, §G1, §G2 and §W0.
-      1. web/routes_schedules.py: the §W4 schedule routes and texts.
-      2. web/routes_code.py: every route in the §W4 Code table and the §W4a credentials box; job submissions use the
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W4 (Code table and §W4a), §G1, §G2 and §W0.
+      1. web/routes_code.py: every route in the §W4 Code table and the §W4a credentials box; job submissions use the
          JobKinds of §Q; Fetch now runs git.fetch via asyncio.to_thread in a background task stored on app.state so
-         tests can await it.
-      3. Templates schedules.html, code.html, commit.html, diff.html (escaped; add/del spans).
-      4. Tests with tests/gitutil.py remotes and logged_in():
-         tests/test_web_schedules.py: list with next fire and paused state; pause/resume persist; Run now submits a
-         manual job with the schedule's selectors; unknown name 404; cockpit.yaml error shown.
-         tests/test_web_code.py: setup form when unconfigured; configure + clone job; commit list marks checkout and
-         remote tip; commit detail and diff fragment (escaping of "<script>" inside a diff); unknown sha 404; update,
-         checkout and track submit the right jobs; pinned banner text; ssh key generation and the confirm rule for
-         replacing it; the GitHub deploy-key link for a github.com URL; PAT form never echoes the value; host-key scan
-         with a monkeypatched scan_host lists fingerprints and confirm writes known_hosts; Clone disabled until the
-         credential exists.
-      5. Definition-of-done commands. No CHANGELOG line.
+         tests can await it. Every POST handler starts with `form = await require_csrf(request)`.
+      2. Templates code.html, commit.html, diff.html (escaped; add/del spans).
+      3. tests/test_web_code.py with tests/gitutil.py remotes and logged_in(): setup form when unconfigured; configure
+         then a clone job; the commit list marks the checkout and the remote tip; commit detail and diff fragment
+         (a "<script>" line inside a diff is escaped); unknown sha 404; update, checkout and track submit the right
+         jobs with the §W4 flash texts; ssh key generation and the confirm rule for replacing it; the GitHub
+         deploy-key link for a github.com URL; the PAT form never echoes the value; host-key scan with a monkeypatched
+         scan_host lists fingerprints and confirm writes known_hosts; Clone disabled until the credential exists.
+      4. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_web_schedules.py tests/test_web_code.py -q passes'
+      - 'python3 -m pytest tests/test_web_code.py tests/test_csrf_routes.py -q passes'
       - 'python3 -m mypy passes'
 
   - id: p17-web-tokens-permissions
@@ -2123,10 +2256,10 @@ phases:
       - tests/test_web_tokens.py
       - tests/test_web_permissions.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W5, §S, §T, §R2 (permissions) and §W0.
-      1. web/routes_tokens.py: the §W5 token routes; set uses check_token_name, clean_token_value, store.set,
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W5, §S, §T, §R2 (permissions) and §W0.
+      1. web/routes_tokens.py: the §W5 token routes; Every POST handler starts with `form = await require_csrf(request)`. set uses check_token_name, clean_token_value, store.set,
          token_checker.forget and check_one; the PrivacyFence settings link is origin + "/settings".
-      2. web/routes_permissions.py: GET with the three views using permissions.merge/render functions; POST refresh
+      2. web/routes_permissions.py (POST handlers start with require_csrf): GET with the three views using permissions.merge/render functions; POST refresh
          starts one background task (stored on app.state) that collects every recipe and upserts permissions_reports.
       3. Templates tokens.html and permissions.html.
       4. Tests with logged_in(): tests/test_web_tokens.py (unknown name shows the suggestion; non-pfst value refused;
@@ -2135,9 +2268,9 @@ phases:
          tests/test_web_permissions.py (with stored reports: recipe, union and group views show rule_text lines and
          NO_SUGGESTIONS where suggested_rules is null; refresh with install_fake_venv + permissions_json stores reports;
          a second refresh while running does not start another task).
-      5. Definition-of-done commands. No CHANGELOG line.
+      5. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_web_tokens.py tests/test_web_permissions.py -q passes'
+      - 'python3 -m pytest tests/test_web_tokens.py tests/test_web_permissions.py tests/test_csrf_routes.py -q passes'
       - 'python3 -m mypy passes'
 
   - id: p18-web-notifications-settings
@@ -2152,52 +2285,71 @@ phases:
       - tests/test_web_notifications.py
       - tests/test_web_settings.py
     brief: |
-      Read docs/cockpit-v1-plan.md §W6, §N, §E (effective settings) and §W0.
-      1. web/routes_notifications.py and notifications.html per §W6; the webhook URL is never rendered after it is saved.
-      2. web/routes_settings.py and settings.html per §W6, with the exact validation messages and the effective
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §W6, §N, §E (effective settings) and §W0.
+      1. web/routes_notifications.py and notifications.html per §W6; Every POST handler starts with `form = await require_csrf(request)`. the webhook URL is never rendered after it is saved.
+      2. web/routes_settings.py and settings.html per §W6 (POST handlers start with require_csrf), with the exact validation messages and the effective
          value/source column from effective(); the password form follows §W1 rules and deletes other sessions.
       3. Tests with logged_in(): tests/test_web_notifications.py (add, invalid URL message, list shows name/format only
          and never the URL, delete, Send test with a Notifier built on httpx2.MockTransport shows "HTTP 200");
          tests/test_web_settings.py (each field saved; each invalid value message; cockpit.yaml server wins and the page
          says so; password change: wrong current, mismatch, success logs out a second session).
-      4. Definition-of-done commands. No CHANGELOG line.
+      4. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_web_notifications.py tests/test_web_settings.py -q passes'
+      - 'python3 -m pytest tests/test_web_notifications.py tests/test_web_settings.py tests/test_csrf_routes.py -q passes'
       - 'python3 -m mypy passes'
 
-  - id: p19-cli
-    title: The cockpit CLI commands for docker exec
+  - id: p19a-cli-info
+    title: CLI commands that inspect and configure (list, permissions, token, schedule, git)
     depends_on: [p14-web-auth]
     complexity: M
     touches:
       - src/privacyfence_cockpit/cli.py
-      - tests/test_cli.py
+      - tests/test_cli_info.py
     brief: |
-      Read docs/cockpit-v1-plan.md §L, §Q (RunLock, Worker.execute) and §R2 (permissions rendering).
-      1. cli.py: add list, check, preflight, permissions, run, test, token set|show|delete, schedule list, git status,
-         git update with the outputs and exit codes in §L. check, preflight, run and test --live build one
-         Job(RUN, "manual", ...) and run it with a Worker built with on_lock_wait (prints the §Q waiting message) and
-         on_line (prints each log line); the worker takes the run lock itself, so the CLI never takes it a second time
-         for these. git update takes RunLock(paths.run_lock) directly with the same on_wait. token set reads with
-         getpass on a TTY, else one stdin line; nothing reads a token from argv.
-      2. tests/test_cli.py using make_cockpit's environment (COCKPIT_DATA_DIR, COCKPIT_MASTER_KEY_FILE via monkeypatch.setenv),
-         tests/fakesync.py and tests/gitutil.py: list output format; run -n prints would-run lines and records nothing;
-         run with an ok and a denied recipe exits 3 and prints both summary lines; --repeat and --stop-on-error;
-         preflight streams lines; check prints the summary; permissions text, --union, --by-group and --json; test with
-         and without pytest in the fake venv (make the fake venv's python a symlink to sys.executable for the "with" case
-         and a script exiting 1 with "No module named pytest" for the "without" case); test --live uses replay; token
-         set from stdin (pfst_ value) then show lists it present and never prints the value; token set with an unknown
-         name exits 1 with the suggestion; delete; schedule list; git status and update against a gitutil remote; the
-         lock message when another process holds the lock (hold it from a subprocess).
-      3. Definition-of-done commands. No CHANGELOG line.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §L, §Q (RunLock) and §R2 (permissions rendering).
+      1. cli.py: add list, permissions (text, --union, --by-group, --json), token set|show|delete, schedule list,
+         git status and git update with the outputs and exit codes of §L. git update takes RunLock(paths.run_lock)
+         with an on_wait printing the §Q waiting message. token set reads with getpass on a TTY, else one stdin line;
+         nothing reads a token from argv. Every command ends with the notifier delivery of §L.
+      2. tests/test_cli_info.py (environment via monkeypatch.setenv of COCKPIT_DATA_DIR and COCKPIT_MASTER_KEY_FILE as
+         make_cockpit sets them; tests/fakesync.py; tests/gitutil.py): list format with and without runs; permissions
+         in each output form from the fake's permissions_json; token set from stdin then show lists it present and the
+         value never appears in captured output; unknown token name exits 1 with the suggestion; non-pfst value
+         refused; delete and its missing case; schedule list; git status and git update against a gitutil remote; the
+         waiting message when a subprocess holds the run lock (release it after a moment from the subprocess).
+      3. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
-      - 'python3 -m pytest tests/test_cli.py -q passes'
+      - 'python3 -m pytest tests/test_cli_info.py -q passes'
+      - 'python3 -m mypy passes'
+
+  - id: p19b-cli-run
+    title: CLI commands that run recipes (check, preflight, run, test, test --live)
+    depends_on: [p19a-cli-info]
+    complexity: M
+    touches:
+      - src/privacyfence_cockpit/cli.py
+      - tests/test_cli_run.py
+    brief: |
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §L and §Q (Worker, on_lock_wait, on_line).
+      1. cli.py: add check, preflight [--attended], run [--attended] [-n/--dry-run] [--stop-on-error] [--repeat N],
+         test [-- ARGS] and test --live, as §L: each builds one Job(RUN, "manual", ...) and runs it with a Worker
+         built with on_lock_wait and on_line printing; the worker takes the run lock itself, so the CLI never takes it
+         a second time. Exit codes per §L.
+      2. tests/test_cli_run.py: run -n prints would-run lines and records nothing; run with an ok and a denied recipe
+         exits 3 and prints both summary lines; --repeat and --stop-on-error; preflight streams lines and passes
+         --attended (fake's record file); check prints the summary and builds the venv first (no venv.current before);
+         test with and without pytest in the fake venv (the fake venv's bin/python is a symlink to sys.executable for the
+         "with" case and a script exiting 1 with "No module named pytest" for the "without" case); test --live uses
+         replay; the waiting message when a subprocess holds the run lock.
+      3. Definition-of-done commands (§0). No CHANGELOG line.
+    acceptance:
+      - 'python3 -m pytest tests/test_cli_run.py -q passes'
       - 'python3 -m pytest -q --cov=privacyfence_cockpit --cov-branch --cov-fail-under=95 passes'
       - 'python3 -m mypy passes'
 
   - id: p20-image
     title: Dockerfile, hash-locked requirements, fixture recipe repository, smoke test, image.yml and compose example
-    depends_on: [p19-cli]
+    depends_on: [p19b-cli-run]
     complexity: M
     touches:
       - Dockerfile
@@ -2211,7 +2363,7 @@ phases:
       - .github/workflows/image.yml
       - .claude/toolkit.yaml
     brief: |
-      Read docs/cockpit-v1-plan.md §I (all of it except release.yml) and §X's compose description.
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §I (all of it except release.yml) and §X's compose description.
       1. requirements/build.in and scripts/update_image_locks.sh per §I; run it (python3 -m pip install uv first) to
          produce requirements/image.lock.txt and requirements/build.lock.txt with hashes; commit both.
       2. Dockerfile and .dockerignore exactly per §I (base digest
@@ -2221,11 +2373,11 @@ phases:
          validates; pin_problem is None; the fake's main() handles --help, run --help, permissions --help and check
          (import it from its path with importlib, no install).
       4. scripts/smoke_image.sh per §I (executable, bash -n clean, shellcheck-clean if shellcheck is installed).
-      5. .github/workflows/image.yml per §I with the action pins from the plan's Current state section (checkout and
+      5. .github/workflows/image.yml per §I (triggers workflow_dispatch, push to feature/**, pull_request) with the action pins from the plan's Current state section (checkout and
          setup-python pins copied from .github/workflows/tests.yml).
       6. docker-compose.yml per §I/§X (port published on 127.0.0.1 only).
       7. .claude/toolkit.yaml: add the ci.dispatchable block from §I verbatim.
-      8. Definition-of-done commands. Docker is not available here: do not try to build; the PR's image.yml run is the
+      8. Definition-of-done commands (§0). Docker is not available here: do not try to build; the PR's image.yml run is the
          proof (final_checks). Read the Dockerfile line by line against §I before committing. No CHANGELOG line.
       Stop condition: if uv cannot resolve the lock for Python 3.12, stop with status=blocked and quote the error.
     acceptance:
@@ -2240,26 +2392,27 @@ phases:
   - id: p21-release
     title: Release workflow that cuts the tag and publishes the multi-arch image with provenance
     depends_on: [p20-image]
-    complexity: S
+    complexity: M
     touches:
       - .github/workflows/release.yml
       - scripts/release_check.py
       - tests/test_release_check.py
       - docs/releasing.md
     brief: |
-      Read docs/cockpit-v1-plan.md §I (release.yml, release_check.py, docs/releasing.md) and the PrivacyFence pattern it
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §I (release.yml, release_check.py, docs/releasing.md) and the PrivacyFence pattern it
       follows (privacyfence/privacyfence .github/workflows/release.yml and publish-pypi.yml: env-passed inputs, dry run
       default true, concurrency group).
-      1. scripts/release_check.py (stdlib only): `--version X.Y.Z` and `--tag vX.Y.Z` modes with every check in §I, one
-         `::error::` line per problem, exit 1 on any.
+      1. scripts/release_check.py (stdlib only): `--version X.Y.Z` and `--tag vX.Y.Z` modes with every check in §I
+         (tuple version comparison, non-matching tags ignored), one `::error::` line per problem, exit 1 on any, and the
+         `latest=true|false` line on success.
       2. tests/test_release_check.py against throwaway git repos in tmp_path (a local bare "origin"): each check passing
-         and failing.
+         and failing; v1.10.0 sorts after v1.9.0; a tag push of v1.0.1 when v1.1.0 exists prints latest=false.
       3. .github/workflows/release.yml per §I with the pinned actions (attest-build-provenance
          4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2, setup-qemu 99012661954931238ded8c8b007157a8430204e1 # v4.4.0,
          setup-buildx f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, build-push c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0,
          login dbcb813823bdd20940b903addbd779551569679f # v4.6.0). Inputs reach shell only through env.
       4. docs/releasing.md per §I.
-      5. Definition-of-done commands. No CHANGELOG line.
+      5. Definition-of-done commands (§0). No CHANGELOG line.
     acceptance:
       - 'python3 -m pytest tests/test_release_check.py -q passes'
       - 'python3 -c "import yaml; yaml.safe_load(open(''.github/workflows/release.yml''))" passes'
@@ -2268,7 +2421,7 @@ phases:
 
   - id: p22-docs
     title: README, user guide, recipe-repository reference and the migration guide from the Mac cockpit
-    depends_on: [p15-web-runs, p16-web-schedules-code, p17-web-tokens-permissions, p18-web-notifications-settings, p21-release]
+    depends_on: [p15-web-runs, p16a-web-schedules, p16b-web-code, p17-web-tokens-permissions, p18-web-notifications-settings, p21-release]
     complexity: M
     touches:
       - README.md
@@ -2276,7 +2429,7 @@ phases:
       - docs/recipe-repository.md
       - docs/migrating-from-the-mac-cockpit.md
     brief: |
-      Read docs/cockpit-v1-plan.md §X, then the code as merged (every message and route quoted in the docs must match
+      Read docs/cockpit-v1-plan.md §0 (worker setup), §X, then the code as merged (every message and route quoted in the docs must match
       the code; grep for each one).
       1. README.md, docs/user-guide.md, docs/recipe-repository.md, docs/migrating-from-the-mac-cockpit.md with the
          content listed in §X. Link ADRs by their final file names docs/adr/0002-… to 0007-… only after p23 creates
@@ -2303,8 +2456,8 @@ phases:
       - docs/cockpit-v1-plan-manual-steps.html
     brief: |
       Read docs/adr/README.md (rules and template) and docs/cockpit-v1-plan.md "Rejected alternatives" and "ADRs".
-      1. Write docs/adr/0002 to 0007 from the template, one decision each, Status "Accepted — <today>. Implemented in
-         <the feature branch's merge>", Context/Decision/Alternatives/Consequences from the plan, Related linking source
+      1. Write docs/adr/0002 to 0007 from the template, one decision each, Status "Accepted — <today's date>. Implemented on
+         feature/cockpit-v1.", Context/Decision/Alternatives/Consequences from the plan, Related linking source
          files (src/privacyfence_cockpit/web/auth.py, crypto.py, secrets_store.py, gitauth.py, cockpit_yaml.py,
          scheduler.py, gitrepo.py, Dockerfile, .github/workflows/release.yml) and ADR 0001, never the plan. Titles:
          0002 "One owner per container, with a local password bootstrapped by a one-time setup code";
