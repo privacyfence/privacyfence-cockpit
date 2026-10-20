@@ -25,6 +25,7 @@ from privacyfence_cockpit.venvs import VenvError, VenvManager
 log = logging.getLogger(__name__)
 
 SCHEDULE_PREFIX = "schedule:"
+LOCK_POLL_SECONDS = 0.25
 
 
 class JobKind(StrEnum):
@@ -127,13 +128,23 @@ class Worker:
         self._on_line = on_line
 
     async def execute(self, job: Job) -> JobSummary:
-        await asyncio.to_thread(self._lock.acquire, self._on_lock_wait)
+        await self._acquire_lock()
         try:
             if job.kind is JobKind.RUN:
                 return await self._run_job(job)
             return await self._git_job(job)
         finally:
             self._lock.release()
+
+    async def _acquire_lock(self) -> None:
+        # Polling instead of a thread blocked on flock: cancellation ends the wait at once and leaves nothing
+        # behind that could take the lock after shutdown.
+        if self._lock.try_acquire():
+            return
+        if self._on_lock_wait is not None:
+            self._on_lock_wait()
+        while not self._lock.try_acquire():
+            await asyncio.sleep(LOCK_POLL_SECONDS)
 
     async def run_forever(self) -> None:
         while True:

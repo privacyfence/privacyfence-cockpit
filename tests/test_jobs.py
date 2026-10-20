@@ -3,10 +3,12 @@ import json
 import logging
 import os
 import shutil
+import threading
 from datetime import UTC, datetime
 
 import pytest
 
+from privacyfence_cockpit import jobs
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import EventKind, ListSink
@@ -324,6 +326,71 @@ async def test_on_lock_wait_is_called_when_another_holder_has_the_lock(env):
     summary = await env.worker(on_lock_wait=waiting).execute(run_job(selectors=("imports/10-one",)))
     assert env.on_wait_calls == 1
     assert len(summary.run_ids) == 1
+
+
+@pytest.fixture
+def fast_poll(monkeypatch):
+    monkeypatch.setattr(jobs, "LOCK_POLL_SECONDS", 0.01)
+
+
+async def test_a_job_waits_for_the_lock_and_runs_when_the_holder_releases(env, fast_poll):
+    holder = RunLock(env.paths.run_lock)
+    assert holder.try_acquire()
+    task = asyncio.create_task(env.worker().execute(run_job(selectors=("imports/10-one",))))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    holder.release()
+    summary = await asyncio.wait_for(task, 2)
+    assert len(summary.run_ids) == 1
+
+
+async def test_on_lock_wait_is_called_once_however_long_the_wait(env, fast_poll):
+    holder = RunLock(env.paths.run_lock)
+    assert holder.try_acquire()
+    task = asyncio.create_task(
+        env.worker(on_lock_wait=lambda: setattr(env, "on_wait_calls", env.on_wait_calls + 1)).execute(
+            run_job(selectors=("imports/10-one",))
+        )
+    )
+    await asyncio.sleep(0.1)
+    holder.release()
+    await asyncio.wait_for(task, 2)
+    assert env.on_wait_calls == 1
+
+
+async def test_cancelling_a_worker_waiting_for_the_lock_ends_at_once_without_a_thread(env):
+    holder = RunLock(env.paths.run_lock)
+    assert holder.try_acquire()
+    threads = threading.active_count()
+    task = asyncio.create_task(env.worker().execute(run_job()))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert threading.active_count() == threads
+    holder.release()
+    other = RunLock(env.paths.run_lock)
+    assert other.try_acquire()  # nothing took the lock after the cancel
+    other.release()
+
+
+async def test_the_lock_is_released_when_cancelled_right_after_acquiring(env):
+    started = asyncio.Event()
+
+    async def hang(job):
+        started.set()
+        await asyncio.Event().wait()
+
+    worker = env.worker()
+    worker._run_job = hang
+    task = asyncio.create_task(worker.execute(run_job()))
+    await asyncio.wait_for(started.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    other = RunLock(env.paths.run_lock)
+    assert other.try_acquire()
+    other.release()
 
 
 # -- auto update ---------------------------------------------------------------------------------
