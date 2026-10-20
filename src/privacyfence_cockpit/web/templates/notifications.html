@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_macros.html" import post_button, field_error %}
+{% block title %}Notifications · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Notifications</h1>
+<p class="muted">Webhook addresses are stored encrypted and are not shown again after saving.</p>
+{% if webhooks %}
+<table class="data">
+  <thead>
+    <tr><th>Name</th><th>Format</th><th>Last status</th><th>Last sent</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for hook in webhooks %}
+    <tr>
+      <td>{{ hook.name }}</td>
+      <td class="mono">{{ hook.format.value }}</td>
+      <td>{{ hook.last_status or "" }}</td>
+      <td>{{ hook.last_sent_at|localtime(tz) }}</td>
+      <td class="actions">
+        {{ post_button("/notifications/%d/test"|format(hook.id), "Send test", csrf_token) }}
+        {{ post_button("/notifications/%d/delete"|format(hook.id), "Delete", csrf_token, {}, "danger") }}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No webhooks yet. Failures are only visible on this dashboard.</p>
+{% endif %}
+
+<h2>Add a webhook</h2>
+<form class="card" method="post" action="/notifications">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ field_error(error) }}
+  <p><label>Name <input type="text" name="name" value="{{ name }}" maxlength="60" required></label></p>
+  <p><label>Format
+    <select name="format">
+      {% for f in formats %}<option value="{{ f }}"{% if f == fmt %} selected{% endif %}>{{ f }}</option>{% endfor %}
+    </select>
+  </label></p>
+  <p><label>URL <input type="url" name="url" autocomplete="off" required></label></p>
+  <p><button type="submit">Add webhook</button></p>
+</form>
+
+<h2>What notifies</h2>
+<ul>
+  {% for text in events %}<li>{{ text }}</li>{% endfor %}
+</ul>
+{% endblock %}
