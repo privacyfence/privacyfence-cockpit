@@ -7,6 +7,7 @@ import asyncio
 import getpass
 import json
 import os
+import subprocess  # nosec B404  # fixed argv, no shell; only `cockpit test` runs the recipe repository's pytest
 import sys
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING
 from privacyfence_cockpit.config import ConfigError, EnvConfig
 
 if TYPE_CHECKING:
+    from privacyfence_cockpit.models import Mode, Outcome
     from privacyfence_cockpit.recipes import Recipe
     from privacyfence_cockpit.services import Cockpit
 
@@ -21,6 +23,9 @@ Handler = Callable[[argparse.Namespace], int]
 Body = Callable[["Cockpit", argparse.Namespace], int]
 
 WAITING = "Waiting for the cockpit's current run to finish…"
+INTERRUPTED = 130
+MAX_REPEAT = 100
+PYTEST_MISSING = "Add pytest to requirements.txt to use cockpit test."
 UNDECRYPTABLE = "A stored secret cannot be decrypted with this master key. Delete it and set it again."
 
 
@@ -89,6 +94,10 @@ def _command(body: Body) -> Handler:
             except (GitError, VenvError) as exc:
                 print(str(exc), file=sys.stderr)
                 code = 2
+            except KeyboardInterrupt:
+                # The runner has already stopped the run; the notifications it raised still go out below.
+                print("Interrupted.", file=sys.stderr)
+                code = INTERRUPTED
             asyncio.run(cockpit.notifier.deliver_pending())
         finally:
             cockpit.db.close()
@@ -294,6 +303,155 @@ def _git_update(cockpit: Cockpit, args: argparse.Namespace) -> int:
     return 0
 
 
+def _repeat(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= MAX_REPEAT:
+        raise argparse.ArgumentTypeError(f"must be a whole number between 1 and {MAX_REPEAT}")
+    return value
+
+
+def _exit_code(outcome: Outcome) -> int:
+    """The exit code `cockpit run` reports for a recipe outcome (plan §L); stopped and timed out are 2."""
+    from privacyfence_cockpit.models import EXIT_CODE_OUTCOMES
+
+    for code, mapped in EXIT_CODE_OUTCOMES.items():
+        if mapped is outcome:
+            return code
+    return 2
+
+
+def _execute(
+    cockpit: Cockpit,
+    chosen: Sequence[Recipe],
+    mode: Mode,
+    *,
+    attended: bool = False,
+    repeat: int = 1,
+    stop_on_error: bool = False,
+) -> tuple[int, int]:
+    """Runs one manual job over the recipes in-process, printing the log lines as they come and one summary line
+    per run. The worker takes the run lock itself. Returns (exit code, number of runs that did not succeed)."""
+    from privacyfence_cockpit.jobs import Job, JobKind, Worker
+    from privacyfence_cockpit.models import OUTCOME_LABELS, SUCCESS_OUTCOMES
+
+    worker = Worker(
+        queue=cockpit.queue,
+        runner=cockpit.runner,
+        git=cockpit.git,
+        venvs=cockpit.venvs,
+        history=cockpit.history,
+        lock=cockpit.lock,
+        recipes=cockpit.recipes,
+        effective=cockpit.effective,
+        events=cockpit.notifier,
+        on_lock_wait=lambda: print(WAITING, file=sys.stderr, flush=True),
+        on_line=lambda line: print(line, flush=True),
+    )
+    job = Job(
+        JobKind.RUN,
+        "manual",
+        selectors=tuple(recipe.path for recipe in chosen),
+        mode=mode,
+        repeat=repeat,
+        stop_on_error=stop_on_error,
+        attended=attended,
+    )
+    summary = asyncio.run(worker.execute(job))
+    code = 0
+    failed = 0
+    for run_id in summary.run_ids:
+        row = cockpit.history.get(run_id)
+        if row is None or row.outcome is None:
+            continue
+        exit_text = f"exit {row.exit_code}" if row.exit_code is not None else "no exit code"
+        print(f"{row.recipe_path}: {OUTCOME_LABELS[row.outcome]} ({exit_text})")
+        if row.outcome not in SUCCESS_OUTCOMES:
+            failed += 1
+            code = code or _exit_code(row.outcome)
+    return code, failed
+
+
+def _check(cockpit: Cockpit, args: argparse.Namespace) -> int:
+    from privacyfence_cockpit.models import Mode
+
+    chosen = _select(cockpit, args.paths)
+    if chosen is None:
+        return 1
+    code, failed = _execute(cockpit, chosen, Mode.CHECK)
+    print(f"check: {len(chosen)} recipe(s), {failed} failed")
+    return code
+
+
+def _preflight(cockpit: Cockpit, args: argparse.Namespace) -> int:
+    from privacyfence_cockpit.models import Mode
+
+    chosen = _select(cockpit, args.paths)
+    if chosen is None:
+        return 1
+    return _execute(cockpit, chosen, Mode.PREFLIGHT, attended=args.attended)[0]
+
+
+def _run(cockpit: Cockpit, args: argparse.Namespace) -> int:
+    from privacyfence_cockpit.models import Mode
+
+    chosen = _select(cockpit, args.paths)
+    if chosen is None:
+        return 1
+    if args.dry_run:
+        for recipe in chosen:
+            print(f"would run: {recipe.path}")
+        return 0
+    mode = Mode.ATTENDED if args.attended else Mode.UNATTENDED
+    return _execute(cockpit, chosen, mode, repeat=args.repeat, stop_on_error=args.stop_on_error)[0]
+
+
+def _test(cockpit: Cockpit, args: argparse.Namespace) -> int:
+    from privacyfence_cockpit.models import Mode
+
+    rest = list(args.args)
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    if args.live:
+        chosen = _select(cockpit, rest)
+        if chosen is None:
+            return 1
+        return _execute(cockpit, chosen, Mode.REPLAY)[0]
+    return _pytest(cockpit, rest)
+
+
+def _pytest(cockpit: Cockpit, pytest_args: Sequence[str]) -> int:
+    """Runs the recipe repository's own tests with the recipe environment's Python, holding the run lock."""
+    cockpit.lock.acquire(lambda: print(WAITING, file=sys.stderr, flush=True))
+    try:
+        result = cockpit.venvs.ensure()
+        if result.path is None:
+            print(result.error or "The recipe environment is not ready.", file=sys.stderr)
+            return 2
+        python = str(result.path / "bin" / "python")
+        # No token and nothing else from the cockpit's own environment reaches the tests.
+        env = {
+            "PATH": f"{result.path}/bin:/usr/local/bin:/usr/bin:/bin",
+            "HOME": str(cockpit.paths.home),
+            "LANG": "C.UTF-8",
+        }
+        cwd = cockpit.paths.repo
+        probe = subprocess.run(  # noqa: S603  # nosec B603  # fixed argv, no shell; the recipe environment's python
+            [python, "-c", "import pytest"], cwd=cwd, env=env, capture_output=True, check=False
+        )
+        if probe.returncode != 0:
+            print(PYTEST_MISSING, file=sys.stderr)
+            return 1
+        tests = subprocess.run(  # noqa: S603  # nosec B603  # fixed argv, no shell; arguments are the owner's own
+            [python, "-m", "pytest", "-q", *pytest_args], cwd=cwd, env=env, check=False
+        )
+    finally:
+        cockpit.lock.release()
+    return 0 if tests.returncode == 0 else 1
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cockpit", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -312,6 +470,24 @@ def _parser() -> argparse.ArgumentParser:
     view.add_argument("--by-group", action="store_true", help="one set of rules per group")
     perms.add_argument("--json", action="store_true", help="print the raw reports as JSON")
     perms.set_defaults(handler=_command(_permissions))
+    check = commands.add_parser("check", help="check the recipes without running them")
+    check.add_argument("paths", nargs="*", metavar="PATH")
+    check.set_defaults(handler=_command(_check))
+    preflight = commands.add_parser("preflight", help="ask PrivacyFence which steps the recipes would be denied")
+    preflight.add_argument("paths", nargs="*", metavar="PATH")
+    preflight.add_argument("--attended", action="store_true", help="wait for approvals")
+    preflight.set_defaults(handler=_command(_preflight))
+    run = commands.add_parser("run", help="run recipes now")
+    run.add_argument("paths", nargs="*", metavar="PATH")
+    run.add_argument("--attended", action="store_true", help="wait for approvals")
+    run.add_argument("-n", "--dry-run", action="store_true", help="list the recipes without running them")
+    run.add_argument("--stop-on-error", action="store_true", help="skip the rest after a recipe that did not succeed")
+    run.add_argument("--repeat", type=_repeat, default=1, metavar="N", help="run each recipe up to N times while ok")
+    run.set_defaults(handler=_command(_run))
+    test = commands.add_parser("test", help="run the recipe repository's tests, or --live to replay the read steps")
+    test.add_argument("--live", action="store_true", help="replay the read-only steps of the recipes (PATH…)")
+    test.add_argument("args", nargs="*", metavar="ARGS", help="pytest arguments after --, or recipe PATHs with --live")
+    test.set_defaults(handler=_command(_test))
     token = commands.add_parser("token", help="manage the stored PrivacyFence tokens").add_subparsers(
         dest="token_command", required=True, metavar="COMMAND"
     )
