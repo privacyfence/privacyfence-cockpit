@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field_error %}
+{% block title %}Settings · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+{% if config_error %}<p class="banner banner-error">{{ config_error }}</p>{% endif %}
+<form class="card" method="post" action="/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ field_error(error) }}
+  <p>
+    <label>PrivacyFence server URL <input type="url" name="server_url" value="{{ values.server_url }}" placeholder="https://privacyfence.example.com/mcp" autocomplete="off"></label><br>
+    <span class="muted">Effective: <span class="mono">{{ effective.server_url or "none" }}</span> (from {{ effective.server_source }}){% if yaml_server %}. cockpit.yaml wins over this setting.{% endif %}</span>
+  </p>
+  <p>
+    <label>Timezone <input type="text" name="timezone" value="{{ values.timezone }}" placeholder="Europe/Budapest" autocomplete="off"></label><br>
+    <span class="muted">Effective: <span class="mono">{{ effective.timezone }}</span> (from {{ effective.timezone_source }}){% if yaml_timezone %}. cockpit.yaml wins over this setting.{% endif %}</span>
+  </p>
+  {% for field, name in number_fields %}
+  <p>
+    <label>{{ field.label }} <input type="number" name="{{ name }}" value="{{ values[name] }}" min="{{ field.low }}" max="{{ field.high }}"></label><br>
+    <span class="muted">Effective: {% if field.key == "log_retention_days" %}{{ effective.retention_days }}{% else %}{{ effective.fetch_interval_minutes }}{% endif %} ({{ "settings" if values[name] else "default" }})</span>
+  </p>
+  {% endfor %}
+  <p>
+    <label><input type="checkbox" name="auto_update" value="1"{% if values.auto_update %} checked{% endif %}> Update before each scheduled run</label><br>
+    <span class="muted">Effective: {{ "on" if effective.auto_update else "off" }}</span>
+  </p>
+  <p class="muted">Run timeout: {{ effective.timeout_minutes }} minute(s), set by <span class="mono">timeout_minutes</span> in cockpit.yaml.</p>
+  <p><button type="submit">Save</button></p>
+</form>
+
+<h2>Password</h2>
+<form class="card" method="post" action="/settings/password">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ field_error(password_error) }}
+  <p><label>Current password <input type="password" name="current" autocomplete="current-password" required></label></p>
+  <p><label>New password <input type="password" name="password" autocomplete="new-password" minlength="{{ min_length }}" required></label></p>
+  <p><label>Confirm new password <input type="password" name="confirm" autocomplete="new-password" required></label></p>
+  <p><button type="submit">Change password</button></p>
+</form>
+{% endblock %}
