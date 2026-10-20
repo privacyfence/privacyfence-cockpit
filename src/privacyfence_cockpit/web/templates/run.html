@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chip, post_button %}
+{% block title %}Run {{ run.id }} · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Run {{ run.id }}</h1>
+<table class="data">
+  <tbody>
+    <tr><th>Recipe</th><td class="mono">{{ run.recipe_path or "—" }}</td></tr>
+    <tr><th>Mode</th><td>{{ run.mode.value }}</td></tr>
+    <tr><th>Trigger</th><td>{{ run.trigger }}</td></tr>
+    <tr><th>Outcome</th><td><span id="run-outcome">{% if run.outcome %}{{ chip(run.outcome) }}{% else %}running{% endif %}</span></td></tr>
+    <tr><th>Exit code</th><td>{{ run.exit_code if run.exit_code is not none else "—" }}</td></tr>
+    <tr><th>Started</th><td>{{ run.started_at|localtime(tz) }}</td></tr>
+    <tr><th>Duration</th><td>{% if run.duration_seconds is not none %}{{ "%.1f"|format(run.duration_seconds) }} s{% else %}—{% endif %}</td></tr>
+    <tr><th>Commit</th><td class="mono">{{ run.commit_sha|sha7 or "—" }}</td></tr>
+    <tr><th>Token source</th><td>{{ run.token_source or "—" }}</td></tr>
+    {% if run.note %}<tr><th>Note</th><td>{{ run.note }}</td></tr>{% endif %}
+  </tbody>
+</table>
+<div class="actions">
+  {% if run.status == "running" %}{{ post_button("/runs/" ~ run.id ~ "/stop", "Stop", csrf_token, cls="danger") }}{% endif %}
+  <a href="/runs/{{ run.id }}/log">Download log</a>
+</div>
+<pre id="log" class="log" data-events="/runs/{{ run.id }}/events"></pre>
+{% endblock %}

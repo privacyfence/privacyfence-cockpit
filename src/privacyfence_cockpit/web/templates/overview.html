@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chip, post_button %}
+{% block title %}Overview · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Overview</h1>
+<p class="muted">
+  {% if running %}Running: <a href="/jobs/{{ running.id }}">{{ running_text }}</a>{% else %}Nothing is running.{% endif %}
+  · {{ queued }} queued
+</p>
+{% if not groups %}
+<p class="muted">No recipes found. Connect the recipe repository on the <a href="/code">Code</a> page.</p>
+{% else %}
+<table class="data">
+  <thead>
+    <tr><th></th><th>Recipe</th><th>Last run</th><th>Next scheduled run</th><th></th></tr>
+  </thead>
+  {% for group, rows in groups %}
+  <tbody>
+    <tr><th colspan="5">{{ group }}</th></tr>
+    {% for row in rows %}
+    <tr>
+      <td><input type="checkbox" name="recipe" value="{{ row.recipe.path }}" form="run-selected" aria-label="Select {{ row.recipe.path }}"></td>
+      <td>
+        <span class="mono">{{ row.recipe.folder }}</span>
+        {% if row.server %}<br><span class="muted">server: {{ row.server }}</span>{% endif %}
+      </td>
+      <td>
+        {% if row.last %}
+        <a href="/runs/{{ row.last.id }}">{{ chip(row.last.outcome) }}</a>
+        <span class="muted">{{ (row.last.finished_at or row.last.started_at)|localtime(tz) }}</span>
+        {% else %}<span class="muted">never</span>{% endif %}
+      </td>
+      <td>{% if row.next_fire %}{{ row.next_fire|localtime(tz) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{{ post_button("/run", "Run", csrf_token, {"recipe": row.recipe.path, "mode": "unattended"}) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  {% endfor %}
+</table>
+<form id="run-selected" class="actions" method="post" action="/run">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Mode
+    <select name="mode">
+      {% for mode in modes %}<option value="{{ mode }}">{{ mode }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="primary">Run selected</button>
+</form>
+{% endif %}
+{% endblock %}

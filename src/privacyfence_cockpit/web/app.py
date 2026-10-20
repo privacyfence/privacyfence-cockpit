@@ -29,7 +29,6 @@ from privacyfence_cockpit.web import (
     routes_tokens,
 )
 from privacyfence_cockpit.web.auth import AuthMiddleware, LoginThrottle, SecurityHeadersMiddleware
-from privacyfence_cockpit.web.render import render
 
 
 def _environment() -> Environment:
@@ -74,11 +73,6 @@ async def healthz(request: Request) -> Response:
     return JSONResponse({"status": "ok"})
 
 
-async def home(request: Request) -> Response:
-    # Temporary: the Overview page (p15) replaces this route and template.
-    return render(request, "home_placeholder.html", {})
-
-
 def create_app(cockpit: Cockpit, *, start_background: bool = True) -> Starlette:
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -100,7 +94,6 @@ def create_app(cockpit: Cockpit, *, start_background: bool = True) -> Starlette:
         *routes_notifications.ROUTES,
         *routes_settings.ROUTES,
         Route("/healthz", healthz),
-        Route("/", home),
         Mount("/static", StaticFiles(packages=[("privacyfence_cockpit.web", "static")]), name="static"),
     ]
     # The first entry is the outermost, so even the auth middleware's redirects carry the headers.
