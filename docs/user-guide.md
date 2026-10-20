@@ -354,8 +354,9 @@ To restore, put the files back into an empty volume and start the container with
   `requirements.txt` and checks that `privacyfence-sync run` accepts `--result-file` and `privacyfence-sync permissions`
   accepts `--json`. Pin a privacyfence-sync version that does. Other messages in that banner: `requirements.txt must pin
   privacyfence-sync (privacyfence-sync==X.Y.Z)`, `the recipe repository has no requirements.txt`, and `pip install
-  failed with exit code N; see logs/venv/<hash>.log` (the log is in `/data/logs/venv/`). Until it is fixed, runs end as
-  `failed` with `the recipe environment is not ready`. A webhook notification is sent once per failure.
+  failed with exit code N; see logs/venv/<hash>.log` (the log is in `/data/logs/venv/`). Until it is fixed, runs keep using the
+  previous environment if one was built earlier; if there is none, they end as `failed` with `the recipe environment is
+  not ready`. A webhook notification is sent once per failure.
 - **Banner `Fetching the recipe repository fails: …`** — look at `Fetch error` on the Code page: a wrong deploy key, a
   host that is not trusted yet, an expired token.
 - **Banner `cockpit.yaml: …`** — fix the file; the message names the key. Scheduling resumes at the next tick.
