@@ -1,0 +1,38 @@
+# devflow toolkit profile (andras-tkcs/claude-toolkit). verify.* mirrors docs/coding-guidelines.md#definition-of-done:
+# change both together. The toolkit comes from the Claude Project's plugins.
+
+project:
+  name: PrivacyFence Cockpit
+
+docs:
+  must_read: [CLAUDE.md, CONTRIBUTING.md, docs/coding-guidelines.md, docs/adr/README.md, docs/reference/cockpit-architecture.md]
+  plan_dir: docs/
+  adr_dir: docs/adr
+  adr_index: docs/adr/README.md
+  adr_bar: CONTRIBUTING.md#decisions-plans-and-adrs
+  changelog: {file: CHANGELOG.md, section: "## [Unreleased]"}
+
+git:
+  main_branch: main
+  branch_pattern: "<type>/<kebab-case>"
+  branch_types: [feature, fix, chore, tests]
+  merge_style: merge-commit
+
+verify:
+  fast:
+    - ruff check .
+    - python3 -m pytest -q
+  dod:
+    - run: python3 -m pytest -v --cov=privacyfence_cockpit --cov-branch --cov-report=term-missing --cov-fail-under=95
+      narrow: python3 -m pytest -v {args}
+    - ruff check .
+    - python3 -m mypy
+    - bandit -c pyproject.toml -r src
+  dod_manual:
+    - "User-visible change? A line under CHANGELOG.md's `## [Unreleased]`, never under a version heading."
+    - "A decision that is hard to reverse, moves a trust boundary, or changes how the image is built or released needs an ADR in docs/adr/."
+    - "No log line, notification or page carries a token, password, master key or recipe data."
+    - "Comments only where the why is non-obvious."
+  dod_doc: docs/coding-guidelines.md#definition-of-done
+
+stacks: [python]
