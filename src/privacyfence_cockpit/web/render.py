@@ -37,7 +37,7 @@ def render(request: Request, template: str, context: dict[str, Any], status_code
         "csrf_token": getattr(request.state, "csrf_token", ""),
         "nav": nav,
         "version": __version__,
-        "authenticated": getattr(request.state, "authenticated", True),
+        "authenticated": getattr(request.state, "authenticated", False),
         **context,
     }
     response: HTMLResponse = request.app.state.templates.TemplateResponse(request, template, full, status_code)

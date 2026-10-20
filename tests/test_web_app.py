@@ -6,7 +6,7 @@ import pytest
 from cockpit_factory import make_cockpit
 from gitutil import make_remote, push_commit
 from starlette.testclient import TestClient
-from webclient import client
+from webclient import client, logged_in
 
 from privacyfence_cockpit.services import Cockpit
 from privacyfence_cockpit.web.app import create_app, localtime, outcome_label, sha7
@@ -45,7 +45,8 @@ def test_static_htmx_is_served(cockpit: Cockpit) -> None:
 
 
 def test_home_placeholder_renders_nav(cockpit: Cockpit) -> None:
-    response = client(cockpit).get("/")
+    c, _ = logged_in(cockpit)
+    response = c.get("/")
     assert response.status_code == 200
     assert 'href="/history"' in response.text
     assert "No recipe repository yet." in response.text

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field_error %}
+{% block title %}Set a password · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Set a password</h1>
+  <p class="muted">The setup code is in the cockpit's log, or printed by <span class="mono">cockpit user reset-password</span>.</p>
+  {{ field_error(error) }}
+  <form method="post" action="/setup">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="code">Setup code</label>
+    <input id="code" name="code" type="text" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required>
+    <label for="confirm">Repeat the password</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="12" required>
+    <div class="actions"><button type="submit">Set password</button></div>
+  </form>
+</section>
+{% endblock %}
