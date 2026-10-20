@@ -35,6 +35,18 @@ class GitError(RuntimeError):
     pass
 
 
+def git_env(home: Path, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """The minimal environment every git process of the cockpit runs with."""
+    return {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        **(extra_env or {}),
+    }
+
+
 @dataclass(frozen=True)
 class Commit:
     sha: str
@@ -290,14 +302,7 @@ class GitManager:
         return result
 
     def _run(self, argv: list[str], extra_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-        env = {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "HOME": str(self._paths.home),
-            "LANG": "C.UTF-8",
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_NOSYSTEM": "1",
-            **extra_env,
-        }
+        env = git_env(self._paths.home, extra_env)
         try:
             return subprocess.run(  # noqa: S603  # nosec B603  # fixed argv, no shell
                 argv, env=env, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False

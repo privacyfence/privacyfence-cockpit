@@ -54,3 +54,40 @@ def test_not_a_git_repo(tmp_path):
     (folder / "workflows" / "10-g" / "10-r").mkdir(parents=True)
     recipe = make(folder, "name: x\n")
     assert cockpit_problems(recipe, folder) == ["the recipe repository is not a git checkout"]
+
+
+def test_check_ignore_runs_with_the_minimal_git_env_and_a_timeout(repo, monkeypatch, tmp_path):
+    import subprocess
+
+    from privacyfence_cockpit import checks
+
+    seen = {}
+    real = subprocess.run
+
+    def spy(argv, **kwargs):
+        seen.update(kwargs)
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(checks.subprocess, "run", spy)
+    monkeypatch.setenv("GIT_DIR", "/nonexistent")
+    assert cockpit_problems(make(repo, "name: x\n", "work/\n"), repo, tmp_path) == []
+    assert seen["env"] == {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "LANG": "C.UTF-8",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    assert seen["timeout"] == checks.TIMEOUT_SECONDS
+
+
+def test_a_hanging_check_ignore_is_cut_by_the_timeout(repo, monkeypatch):
+    import subprocess
+
+    from privacyfence_cockpit import checks
+
+    real = subprocess.run
+    monkeypatch.setattr(checks, "TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(checks.subprocess, "run", lambda argv, **kw: real(["sleep", "30"], **kw))
+    problems = cockpit_problems(make(repo, "name: x\n", "work/\n"), repo)
+    assert problems == ["git check-ignore timed out after 0.2 seconds"]

@@ -191,3 +191,30 @@ async def test_collect_non_object_json(env):
     env.venv(permissions_json=[1])
     report = await collect(env.recipe, env.runner())
     assert report.error == "privacyfence-sync permissions printed invalid JSON"
+
+
+def _state(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        return None
+
+
+async def test_collect_timeout_kills_the_children_too(env, tmp_path):
+    import asyncio
+    import stat
+
+    pidfile = tmp_path / "child.pid"
+    venv = env.venv()
+    script = venv / "bin" / "privacyfence-sync"
+    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nwait\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    report = await collect(env.recipe, env.runner(), timeout=0.5)
+    assert report.error == "privacyfence-sync permissions timed out after 0.5 s"
+    child = int(pidfile.read_text())
+    for _ in range(100):
+        if _state(child) in (None, "Z"):
+            break
+        await asyncio.sleep(0.02)
+    assert _state(child) in (None, "Z")
