@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Mount, Route
@@ -27,6 +28,7 @@ from privacyfence_cockpit.web import (
     routes_settings,
     routes_tokens,
 )
+from privacyfence_cockpit.web.auth import AuthMiddleware, LoginThrottle, SecurityHeadersMiddleware
 from privacyfence_cockpit.web.render import render
 
 
@@ -101,7 +103,10 @@ def create_app(cockpit: Cockpit, *, start_background: bool = True) -> Starlette:
         Route("/", home),
         Mount("/static", StaticFiles(packages=[("privacyfence_cockpit.web", "static")]), name="static"),
     ]
-    app = Starlette(routes=routes, lifespan=lifespan)
+    # The first entry is the outermost, so even the auth middleware's redirects carry the headers.
+    middleware = [Middleware(SecurityHeadersMiddleware), Middleware(AuthMiddleware, cockpit=cockpit)]
+    app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.cockpit = cockpit
+    app.state.login_throttle = LoginThrottle(cockpit.clock)
     app.state.templates = Jinja2Templates(env=_environment())
     return app
