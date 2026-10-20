@@ -18,3 +18,7 @@ facts they use are in [`.claude/toolkit.yaml`](.claude/toolkit.yaml).
 
 Docker is not available in a cloud session. Anything that needs `docker build` or a running
 container is dispatched to the `image.yml` workflow once that workflow exists.
+
+A cloud checkout arrives shallow and without tags, so setuptools_scm would bake in the fallback
+version. Before the definition of done, run `git fetch --unshallow --tags origin` and
+`python3 -m pip install -e ".[dev,test]"`.
