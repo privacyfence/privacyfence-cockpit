@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from privacyfence_cockpit import runner as runner_module
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import NullSink
@@ -16,7 +17,7 @@ from privacyfence_cockpit.history import History
 from privacyfence_cockpit.models import RESULT_FILE_OUTCOMES, Mode, Outcome
 from privacyfence_cockpit.paths import DataPaths
 from privacyfence_cockpit.recipes import discover
-from privacyfence_cockpit.runner import SHUTDOWN_NOTE, Runner
+from privacyfence_cockpit.runner import LINE_TRUNCATED, SHUTDOWN_NOTE, Runner
 from privacyfence_cockpit.secrets_store import SecretStore
 from privacyfence_cockpit.tokens import TokenResolver
 from privacyfence_cockpit.venvs import VenvManager
@@ -418,3 +419,58 @@ async def test_environment_token_is_reported_as_env_and_never_logged(env):
     assert "# token: env" in text
     assert TOKEN not in text
     assert env.records()[0]["env"]["PRIVACYFENCE_TOKEN"] == TOKEN
+
+
+async def test_a_line_over_the_stream_limit_is_logged_whole(env):
+    env.venv(lines=["before", "x" * 70_000, "after"])
+    seen = []
+    result = await env.run(on_line=seen.append)
+    assert result.outcome is Outcome.OK
+    assert "x" * 70_000 in log_lines(result)
+    assert [seen[-3], seen[-1]] == ["before", "after"]
+    assert env.history.get(result.run_id).pid is None
+
+
+async def test_a_line_over_the_cap_is_truncated_and_the_rest_consumed(env, monkeypatch):
+    monkeypatch.setattr(runner_module, "_MAX_LINE_BYTES", 1000)
+    env.venv(lines=["y" * 200_000, "tail"])
+    seen = []
+    result = await env.run(on_line=seen.append)
+    assert result.outcome is Outcome.OK
+    assert seen[-2:] == ["y" * 1000 + LINE_TRUNCATED, "tail"]
+    assert max(len(line) for line in log_lines(result)) < 2000
+
+
+async def test_an_invalid_replay_recipe_fails_the_row_without_a_process(env):
+    env.venv()
+    write_recipe(env, "- just\n- a list\n")
+    result = await env.run(mode=Mode.REPLAY)
+    row = env.history.get(result.run_id)
+    assert result.outcome is Outcome.FAILED
+    assert (row.status, row.outcome, row.pid) == ("finished", Outcome.FAILED, None)
+    assert row.note == "unexpected error: AttributeError"
+    assert not env.record.exists()
+    assert log_lines(result)[-2] == "# outcome: failed"
+    assert not (env.recipe.dir / ".replay.yaml").exists()
+
+
+async def test_an_unexpected_error_after_start_stops_the_group(env, monkeypatch):
+    env.venv(sleep=5.0, lines=["hello"])
+    runner = env.runner()
+
+    pgids = []
+
+    async def boom(proc, log, on_line):
+        pgids.append(proc.pid)
+        raise RuntimeError(TOKEN)
+
+    monkeypatch.setattr(runner, "_pump", boom)
+    result = await asyncio.wait_for(env.run(runner=runner), 5)
+    row = env.history.get(result.run_id)
+    assert result.outcome is Outcome.FAILED
+    assert (row.status, row.outcome, row.pid) == ("finished", Outcome.FAILED, None)
+    assert row.note == "unexpected error: RuntimeError"
+    text = result.log_path.read_text()
+    assert TOKEN not in text
+    assert log_lines(result)[-3:][0] == "# exit code: none"
+    assert_group_gone(pgids[0])
