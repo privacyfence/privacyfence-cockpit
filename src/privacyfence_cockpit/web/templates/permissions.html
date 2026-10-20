@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "_macros.html" import post_button %}
+{% block title %}Permissions · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Permissions</h1>
+<p class="muted">The rules PrivacyFence needs for each recipe, as reported by <span class="mono">privacyfence-sync permissions</span>. Add them to the recipe's token in PrivacyFence.</p>
+<p class="actions">
+  {% for v in views %}{% if v == view %}<strong>{{ v }}</strong>{% else %}<a href="/permissions?view={{ v }}">{{ v }}</a>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+  {{ post_button("/permissions/refresh?view=" ~ view, "Refresh", csrf_token) }}
+</p>
+<div id="reports"{% if running %} hx-get="/permissions?view={{ view }}" hx-trigger="every 3s" hx-select="#reports" hx-swap="outerHTML"{% endif %}>
+  {% if running %}<p class="muted">Refreshing…</p>{% endif %}
+  {% for block in blocks %}
+  <div class="card">
+    <h2 class="mono">{{ block.title }}</h2>
+    {% if block.created_at %}<p class="muted">Collected {{ block.created_at|localtime(tz) }}{% if block.commit_sha %} at {{ block.commit_sha|sha7 }}{% endif %}</p>{% endif %}
+    <ul class="mono">
+      {% for line in block.lines %}<li>{{ (" " * line.indent) ~ line.text }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% else %}
+  {% if not running %}<p class="muted">No reports yet. Press Refresh to collect them.</p>{% endif %}
+  {% endfor %}
+  {% if uncollected and blocks %}
+  <p class="muted">Not collected yet: {% for p in uncollected %}<span class="mono">{{ p }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {% endif %}
+</div>
+{% endblock %}

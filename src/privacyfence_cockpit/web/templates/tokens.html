@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "_macros.html" import post_button, field_error %}
+{% block title %}Tokens · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Tokens</h1>
+<p class="muted">PrivacyFence scoped tokens (<span class="mono">pfst_…</span>), encrypted on the data volume. A recipe uses the token named after its path, then its group, then <span class="mono">default</span>.</p>
+{% if env_token %}
+<p class="banner banner-warning">PRIVACYFENCE_TOKEN is set in the container environment: it overrides every stored token for runs. The checks below still use the stored tokens.</p>
+{% endif %}
+{% if rows %}
+<table class="data">
+  <thead>
+    <tr><th>Name</th><th>State</th><th>Label</th><th>Expires</th><th>Days left</th><th>Checked</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      <td class="mono">{{ row.name }}</td>
+      <td>
+        {% if row.state %}<span class="chip chip-{{ row.chip }}">{{ row.state }}</span>{% else %}<span class="muted">not checked</span>{% endif %}
+        {% if row.error %}<br><span class="muted">{{ row.error }}</span>{% endif %}
+      </td>
+      <td>{{ row.label or "" }}</td>
+      <td>{{ row.expires_at|localtime(tz) }}</td>
+      <td>{% if row.days_left is not none %}{{ row.days_left }}{% endif %}</td>
+      <td>{{ row.checked_at|localtime(tz) }}</td>
+      <td class="actions">{{ post_button("/tokens/delete", "Delete", csrf_token, {"name": row.name}, "danger") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No tokens are stored.</p>
+{% endif %}
+<p class="actions">{{ post_button("/tokens/check", "Check all now", csrf_token) }}</p>
+{% if settings_link %}
+<p>Last use and last denial of each token: <a href="{{ settings_link }}" target="_blank" rel="noopener noreferrer">{{ settings_link }}</a></p>
+{% endif %}
+
+{% if missing %}
+<h2>Without a token</h2>
+<p class="muted">{% for n in missing %}<span class="mono">{{ n }}</span> (missing){% if not loop.last %}, {% endif %}{% endfor %}</p>
+{% endif %}
+
+<h2>Set a token</h2>
+<form class="card" method="post" action="/tokens">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ field_error(error) }}
+  <p><label>Name <input type="text" name="name" list="token-names" value="{{ name }}" required autocomplete="off"></label></p>
+  <datalist id="token-names">
+    {% for n in valid_names %}<option value="{{ n }}"></option>{% endfor %}
+  </datalist>
+  <p><label>Token <input type="password" name="value" autocomplete="off" required></label></p>
+  <p><button type="submit">Save and check</button></p>
+</form>
+{% endblock %}
