@@ -25,11 +25,14 @@ dependencies = [
 test = ["pytest", "pytest-cov", "pytest-asyncio", "httpx"]
 dev = ["ruff", "mypy", "bandit", "types-PyYAML", "types-croniter"]
 
+[project.scripts]
+cockpit = "privacyfence_cockpit.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-privacyfence_cockpit = ["py.typed"]
+privacyfence_cockpit = ["py.typed", "web/templates/*.html", "web/static/*"]
 
 [tool.setuptools_scm]
 fallback_version = "0.0.0.dev0"
