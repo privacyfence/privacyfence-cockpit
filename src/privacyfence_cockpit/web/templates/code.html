@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% from "_macros.html" import post_button, field_error %}
+{% macro repo_form(button) %}
+<form method="post" action="/code/setup">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <p>
+    <label>Repository URL<br>
+      <input type="text" name="url" size="50" autocomplete="off" required
+             placeholder="git@github.com:owner/recipes.git or https://…">
+    </label>
+  </p>
+  {{ field_error(setup_error) }}
+  <p>
+    <label>Branch <input type="text" name="branch" value="{{ default_branch }}" required></label>
+    <label>Access
+      <select name="auth">
+        <option value="ssh"{% if form_auth == "ssh" %} selected{% endif %}>ssh (deploy key)</option>
+        <option value="https"{% if form_auth == "https" %} selected{% endif %}>https (access token)</option>
+      </select>
+    </label>
+  </p>
+  <button type="submit" class="primary">{{ button }}</button>
+</form>
+{% endmacro %}
+{% block title %}Code · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>Code</h1>
+{% if not status.configured %}
+<div class="card">
+  <h2>Recipe repository</h2>
+  <p class="muted">Where the recipes live. The cockpit only ever reads from it.</p>
+  {{ repo_form("Save") }}
+</div>
+{% else %}
+<div class="grid2">
+<div class="card">
+  <h2>Repository</h2>
+  <table class="data">
+    <tbody>
+      <tr><th>URL</th><td class="mono">{{ url }}</td></tr>
+      <tr><th>Branch</th><td class="mono">{{ status.branch }}</td></tr>
+      <tr><th>Access</th><td>{{ auth }}</td></tr>
+      {% if status.cloned %}
+      <tr><th>Checked out</th><td><span class="mono">{{ status.head|sha7 }}</span>
+        {% if status.pinned_sha %}(pinned){% else %}(tracking {{ status.branch }}){% endif %}</td></tr>
+      <tr><th>Remote tip</th><td class="mono">{{ status.remote_tip|sha7 or "—" }}</td></tr>
+      <tr><th>New commits</th><td>{{ status.new_commits }}</td></tr>
+      {% else %}
+      <tr><th>Checkout</th><td class="muted">not cloned yet</td></tr>
+      {% endif %}
+      <tr><th>Last fetch</th><td>{% if status.last_fetch_ok_at %}{{ status.last_fetch_ok_at|localtime(tz) }}{% else %}<span class="muted">never</span>{% endif %}</td></tr>
+      {% if status.last_fetch_error %}<tr><th>Fetch error</th><td class="danger">{{ status.last_fetch_error }}</td></tr>{% endif %}
+    </tbody>
+  </table>
+  {% if status.dirty %}
+  <p class="banner banner-warning" role="alert">The checkout has changes to tracked files; the cockpit will not overwrite them.</p>
+  {% endif %}
+  <details{% if setup_error %} open{% endif %}>
+    <summary>Change repository</summary>
+    {{ repo_form("Save") }}
+  </details>
+</div>
+
+<div class="card">
+  <h2>Credentials</h2>
+  {% if credential.error %}
+  <p class="banner banner-error" role="alert">{{ credential.error }}</p>
+  {% endif %}
+  {% if credential.auth == "ssh" %}
+    {% if credential.public_key %}
+    <p>Deploy key (public half):</p>
+    <textarea class="key" readonly rows="3">{{ credential.public_key }}</textarea>
+    {% if credential.key_link %}
+    <p><a href="{{ credential.key_link }}" target="_blank" rel="noopener noreferrer">Add it as a deploy key</a> with "Allow write access" left off.</p>
+    {% else %}
+    <p class="muted">Add it as a read-only deploy key on your Git server.</p>
+    {% endif %}
+    {% else %}
+    <p class="muted">No deploy key yet.</p>
+    {% endif %}
+    <form method="post" action="/code/ssh-key">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if credential.public_key %}
+      <label><input type="checkbox" name="confirm" value="1"> Replace the existing key</label>
+      <button type="submit" class="danger">Generate a new deploy key</button>
+      {% else %}
+      <button type="submit">Generate a deploy key</button>
+      {% endif %}
+    </form>
+    {% if credential.host and not credential.host_known %}
+    <h3>Host key of {{ credential.host }}{% if credential.port != 22 %}:{{ credential.port }}{% endif %}</h3>
+    <p class="muted">The server's identity is not trusted yet.</p>
+    {% if credential.pending %}
+    <table class="data">
+      <thead><tr><th>Type</th><th>Fingerprint</th></tr></thead>
+      <tbody>
+      {% for key in credential.pending %}
+        <tr><td>{{ key.key_type }}</td><td class="mono">{{ key.fingerprint }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted">Compare these with the fingerprints your Git server publishes before confirming.</p>
+    {{ post_button("/code/host-keys/confirm", "Trust these host keys", csrf_token, cls="primary") }}
+    {% endif %}
+    {{ post_button("/code/host-keys/scan", "Scan host keys" if not credential.pending else "Scan again", csrf_token) }}
+    {% endif %}
+  {% elif credential.auth == "https" %}
+    <p>Access token: <strong>{% if credential.token_present %}present{% else %}missing{% endif %}</strong></p>
+    <form method="post" action="/code/pat">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="password" name="token" autocomplete="off" required>
+      <button type="submit">Save token</button>
+    </form>
+    <p class="muted">A fine-grained token with read-only "Contents" access to this one repository.</p>
+  {% else %}
+    <p class="muted">This repository needs no credentials.</p>
+  {% endif %}
+</div>
+</div>
+
+<div class="actions">
+  {{ post_button("/code/fetch", "Fetch now", csrf_token) }}
+  {% if status.cloned %}
+  {{ post_button("/code/update", "Update to latest", csrf_token, cls="primary") }}
+  {% if status.pinned_sha %}{{ post_button("/code/track", "Return to tracking", csrf_token) }}{% endif %}
+  {% endif %}
+  <form class="inline" method="post" action="/code/clone">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit"{% if status.cloned %} class="danger"{% endif %}{% if not credential.clone_ready %} disabled{% endif %}>{% if status.cloned %}Re-clone{% else %}Clone{% endif %}</button>
+  </form>
+</div>
+
+{% if status.cloned %}
+<h2>Commits</h2>
+{% if commits_error %}
+<p class="banner banner-error" role="alert">{{ commits_error }}</p>
+{% elif commits %}
+<table class="data">
+  <thead><tr><th>Commit</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead>
+  <tbody>
+  {% for commit in commits %}
+    <tr>
+      <td class="mono"><a href="/code/commits/{{ commit.sha }}">{{ commit.sha|sha7 }}</a></td>
+      <td>{{ commit.subject }}
+        {% if commit.sha == status.head %}<strong>checked out</strong>{% endif %}
+        {% if commit.sha == status.remote_tip %}<span class="muted">origin/{{ status.branch }}</span>{% endif %}
+      </td>
+      <td>{{ commit.author }}</td>
+      <td>{{ commit.date|localtime(tz) }}</td>
+      <td class="actions">
+        {% if commit.sha != status.head %}{{ post_button("/code/checkout", "Check out this commit", csrf_token, {"sha": commit.sha}) }}{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No commits.</p>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}
