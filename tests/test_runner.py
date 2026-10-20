@@ -1,0 +1,358 @@
+import asyncio
+import json
+import os
+import shutil
+import sys
+import time
+from datetime import UTC, datetime
+
+import pytest
+
+from privacyfence_cockpit.db import Database
+from privacyfence_cockpit.effective import Effective
+from privacyfence_cockpit.events import NullSink
+from privacyfence_cockpit.gitrepo import GitManager, no_credentials
+from privacyfence_cockpit.history import History, HistoryFilter
+from privacyfence_cockpit.models import RESULT_FILE_OUTCOMES, Mode, Outcome
+from privacyfence_cockpit.paths import DataPaths
+from privacyfence_cockpit.recipes import discover
+from privacyfence_cockpit.runner import SHUTDOWN_NOTE, Runner
+from privacyfence_cockpit.secrets_store import SecretStore
+from privacyfence_cockpit.tokens import TokenResolver
+from privacyfence_cockpit.venvs import VenvManager
+from tests.fakesync import install_fake_venv
+from tests.gitutil import git
+
+TOKEN = "pfst_" + "x" * 30
+NOW = datetime(2026, 10, 20, 6, 15, 7, tzinfo=UTC)
+
+
+class Env:
+    def __init__(self, tmp_path):
+        self.paths = DataPaths(tmp_path / "data").ensure()
+        self.db = Database(self.paths.db_file)
+        self.db.migrate()
+        self.history = History(self.db)
+        self.store = SecretStore(self.paths.secrets, os.urandom(32))
+        self.record = tmp_path / "record.jsonl"
+        self.server_url = "https://pf.example.invalid/mcp"
+        self.timeout_minutes = 60
+        self.env_token = None
+        self.repo = self.paths.repo
+        recipe_dir = self.repo / "workflows" / "10-imports" / "10-sf"
+        recipe_dir.mkdir(parents=True)
+        (recipe_dir / "recipe.yaml").write_text("name: fixture\n")
+        git(self.repo, "init", "-b", "main")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-m", "initial")
+        self.sha = git(self.repo, "rev-parse", "HEAD")
+        self.recipe = discover(self.repo)[0]
+
+    def venv(self, **kwargs):
+        kwargs.setdefault("record", self.record)
+        return install_fake_venv(self.paths, self.db, **kwargs)
+
+    def effective(self):
+        return Effective(
+            server_url=self.server_url,
+            server_source="settings" if self.server_url else "none",
+            timezone="Europe/Budapest",
+            timezone_source="settings",
+            timeout_minutes=self.timeout_minutes,
+            retention_days=90,
+            fetch_interval_minutes=15,
+            auto_update=False,
+        )
+
+    def runner(self, **kwargs):
+        kwargs.setdefault("kill_grace_seconds", 0.5)
+        return Runner(
+            paths=self.paths,
+            history=self.history,
+            venvs=VenvManager(self.paths, self.db, NullSink()),
+            git=GitManager(self.paths, self.db, no_credentials, NullSink()),
+            tokens=TokenResolver(self.store, self.env_token),
+            effective=self.effective,
+            clock=lambda: NOW,
+            **kwargs,
+        )
+
+    def records(self):
+        return [json.loads(line) for line in self.record.read_text().splitlines()]
+
+    async def run(self, runner=None, mode=Mode.UNATTENDED, **kwargs):
+        return await (runner or self.runner()).run(
+            self.recipe, mode=mode, trigger="manual", job_id="job1", **kwargs
+        )
+
+
+@pytest.fixture
+def env(tmp_path):
+    e = Env(tmp_path)
+    yield e
+    e.db.close()
+
+
+def log_lines(result):
+    return result.log_path.read_text().splitlines()
+
+
+async def wait_for_pid(env, run_id=1):
+    for _ in range(200):
+        row = env.history.get(run_id)
+        if row is not None and row.pid:
+            return row.pid
+        await asyncio.sleep(0.02)
+    raise AssertionError("the run never started")
+
+
+def assert_group_gone(pgid):
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)
+
+
+@pytest.mark.parametrize(
+    ("mode", "attended", "expected"),
+    [
+        (Mode.UNATTENDED, False, ["run", "{yaml}", "--result-file", "{result}"]),
+        (Mode.ATTENDED, False, ["run", "{yaml}", "--result-file", "{result}", "--attended"]),
+        (Mode.PREFLIGHT, False, ["preflight", "{yaml}"]),
+        (Mode.PREFLIGHT, True, ["preflight", "{yaml}", "--attended"]),
+        (Mode.CHECK, True, ["check", "{yaml}"]),
+    ],
+)
+async def test_argv_per_mode(env, mode, attended, expected):
+    env.venv()
+    await env.run(mode=mode, attended=attended)
+    argv = env.records()[0]["argv"]
+    yaml = str(env.recipe.yaml_path)
+    if "--result-file" in argv:
+        result = argv[argv.index("--result-file") + 1]
+        assert result.endswith("/result.json")
+        assert not os.path.exists(os.path.dirname(result))
+    else:
+        result = ""
+    assert argv == [a.format(yaml=yaml, result=result) for a in expected]
+
+
+async def test_replay_is_not_implemented_yet(env):
+    with pytest.raises(NotImplementedError, match="p8"):
+        await env.run(mode=Mode.REPLAY)
+    assert env.history.count(HistoryFilter()) == 0
+
+
+async def test_env_has_exactly_the_documented_keys(env):
+    venv = env.venv()
+    env.store.set("token", "default", TOKEN)
+    result = await env.run()
+    assert result.outcome is Outcome.OK
+    record = env.records()[0]
+    # the fake itself adds nothing; the interpreter may add LC_CTYPE when it coerces the C locale
+    seen = {k for k in record["env"] if k != "LC_CTYPE"}
+    assert seen == {"PATH", "HOME", "LANG", "TZ", "PRIVACYFENCE_MCP_URL", "PRIVACYFENCE_TOKEN"}
+    assert record["env"]["PATH"] == f"{venv}/bin:/usr/local/bin:/usr/bin:/bin"
+    assert record["env"]["HOME"] == str(env.paths.home)
+    assert record["env"]["LANG"] == "C.UTF-8"
+    assert record["env"]["TZ"] == "Europe/Budapest"
+    assert record["env"]["PRIVACYFENCE_MCP_URL"] == env.server_url
+    assert record["env"]["PRIVACYFENCE_TOKEN"] == TOKEN
+    assert os.path.samefile(record["cwd"], env.recipe.dir)
+
+
+async def test_env_omits_token_and_server_when_absent(env):
+    env.venv()
+    env.server_url = None
+    await env.run()
+    seen = {k for k in env.records()[0]["env"] if k != "LC_CTYPE"}
+    assert seen == {"PATH", "HOME", "LANG", "TZ"}
+
+
+@pytest.mark.parametrize("name", sorted(RESULT_FILE_OUTCOMES))
+async def test_outcome_from_result_file(env, name):
+    env.venv(outcome=name, exit_code=0)
+    result = await env.run()
+    assert result.outcome is RESULT_FILE_OUTCOMES[name]
+    assert env.history.get(result.run_id).outcome is RESULT_FILE_OUTCOMES[name]
+
+
+async def test_missing_or_unknown_result_file_is_failed(env):
+    env.venv(outcome=None)
+    assert (await env.run()).outcome is Outcome.FAILED
+    env.venv(outcome="surprise")
+    assert (await env.run()).outcome is Outcome.FAILED
+
+
+async def test_unreadable_result_file_is_failed(env):
+    runner = env.runner()
+    assert runner._result_outcome(None) is Outcome.FAILED
+    assert runner._result_outcome(env.paths.root / "missing.json") is Outcome.FAILED
+    broken = env.paths.root / "broken.json"
+    broken.write_text("[1]")
+    assert runner._result_outcome(broken) is Outcome.FAILED
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(0, Outcome.OK), (1, Outcome.RECIPE_ERROR), (2, Outcome.FAILED), (3, Outcome.DENIED),
+     (4, Outcome.NOT_SIGNED_IN), (9, Outcome.FAILED)],
+)
+@pytest.mark.parametrize("mode", [Mode.PREFLIGHT, Mode.CHECK])
+async def test_preflight_and_check_outcome_from_exit_code(env, mode, code, expected):
+    env.venv(exit_code=code, outcome="ok")
+    result = await env.run(mode=mode)
+    assert result.outcome is expected
+    assert result.exit_code == code
+
+
+async def test_run_mode_exit_code_is_recorded_but_result_file_decides(env):
+    env.venv(exit_code=3, outcome="denied")
+    result = await env.run()
+    assert (result.outcome, result.exit_code) == (Outcome.DENIED, 3)
+    row = env.history.get(result.run_id)
+    assert (row.exit_code, row.status, row.pid) == (3, "finished", None)
+
+
+async def test_timeout(env):
+    env.venv(sleep=2.0)
+    env.timeout_minutes = 1
+    started = time.monotonic()
+    result = await env.run(runner=env.runner(timeout_unit_seconds=0.05))
+    assert time.monotonic() - started < 3
+    assert result.outcome is Outcome.TIMED_OUT
+    assert env.history.get(result.run_id).pid is None
+
+
+async def test_stop_from_another_task(env):
+    env.venv(sleep=2.0)
+    runner = env.runner()
+    task = asyncio.create_task(env.run(runner=runner))
+    pgid = await wait_for_pid(env)
+    assert runner.stop(1) is True
+    result = await asyncio.wait_for(task, 3)
+    assert result.outcome is Outcome.STOPPED
+    assert env.history.get(1).stop_requested is True
+    assert_group_gone(pgid)
+
+
+async def test_stop_escalates_to_sigkill(env):
+    bin_dir = env.paths.venvs / "stubborn" / "bin"
+    bin_dir.mkdir(parents=True)
+    script = bin_dir / "privacyfence-sync"
+    script.write_text(
+        f"#!{sys.executable}\nimport signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n    time.sleep(0.1)\n"
+    )
+    script.chmod(0o755)
+    (bin_dir.parent / ".cockpit-ready").write_text("")
+    env.db.set_setting("venv.current", "stubborn")
+    runner = env.runner()
+    task = asyncio.create_task(env.run(runner=runner))
+    pgid = await wait_for_pid(env)
+    await asyncio.sleep(0.2)
+    assert runner.stop(1) is True
+    result = await asyncio.wait_for(task, 4)
+    assert result.outcome is Outcome.STOPPED
+    assert_group_gone(pgid)
+
+
+async def test_stop_without_a_running_process(env):
+    env.venv()
+    runner = env.runner()
+    assert runner.stop(404) is False
+    result = await env.run(runner=runner)
+    assert runner.stop(result.run_id) is False
+
+
+async def test_cancellation_stops_the_run_and_reraises(env):
+    env.venv(sleep=2.0)
+    task = asyncio.create_task(env.run())
+    pgid = await wait_for_pid(env)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = env.history.get(1)
+    assert (row.status, row.outcome, row.note) == ("finished", Outcome.STOPPED, SHUTDOWN_NOTE)
+    assert row.pid is None
+    assert_group_gone(pgid)
+    log = next(env.paths.logs.rglob("*.log")).read_text().splitlines()
+    assert log[-3:] == ["# exit code: none", "# outcome: stopped", "# duration: 0.0 s"]
+
+
+async def test_cancellation_before_the_process_exists(env):
+    env.venv()
+    task = asyncio.create_task(env.run())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert env.history.get(1).outcome is Outcome.STOPPED
+
+
+async def test_no_venv_fails_without_a_subprocess(env):
+    lines = []
+    result = await env.run(on_line=lines.append)
+    assert result.outcome is Outcome.FAILED
+    assert result.exit_code is None
+    assert not env.record.exists()
+    expected = "# the recipe environment is not ready: no environment has been built"
+    assert lines == [expected]
+    assert expected in log_lines(result)
+    env.db.set_setting("venv.last_error", "pip install failed with exit code 1; see logs/venv/x.log")
+    result = await env.run()
+    assert "# the recipe environment is not ready: pip install failed with exit code 1; see logs/venv/x.log" in (
+        log_lines(result)
+    )
+
+
+async def test_spawn_failure_is_failed(env):
+    venv = env.venv()
+    (venv / "bin" / "privacyfence-sync").unlink()
+    result = await env.run()
+    assert result.outcome is Outcome.FAILED
+    assert any(line.startswith("# could not start privacyfence-sync: ") for line in log_lines(result))
+    assert env.history.get(result.run_id).outcome is Outcome.FAILED
+
+
+async def test_header_footer_log_path_and_lines(env):
+    env.venv(lines=["first", "ünï"], exit_code=0, outcome="no_change")
+    env.store.set("token", "imports", TOKEN)
+    seen = []
+    result = await env.run(on_line=seen.append)
+    assert seen == ["first", "ünï"]
+    lines = log_lines(result)
+    argv = env.records()[0]["argv"]
+    assert lines[:7] == [
+        "# PrivacyFence Cockpit run 1",
+        "# recipe: imports/10-sf",
+        "# mode: unattended   trigger: manual",
+        f"# command: privacyfence-sync run workflows/10-imports/10-sf/recipe.yaml --result-file {argv[3]}",
+        "# token: group:imports",
+        f"# commit: {env.sha}",
+        "# started: 2026-10-20T06:15:07Z",
+    ]
+    assert lines[7:] == ["first", "ünï", "# exit code: 0", "# outcome: no change", "# duration: 0.0 s"]
+    assert result.log_path == env.paths.logs / "2026-10-20" / "061507_imports_10-sf_1.log"
+    row = env.history.get(1)
+    assert row.log_path == "logs/2026-10-20/061507_imports_10-sf_1.log"
+    assert (row.commit_sha, row.token_source, row.job_id, row.trigger) == (env.sha, "group:imports", "job1", "manual")
+    assert TOKEN not in result.log_path.read_text()
+
+
+async def test_header_without_commit_or_token(env):
+    env.venv(lines=["ok"])
+    shutil.rmtree(env.repo / ".git")
+    result = await env.run(mode=Mode.CHECK)
+    lines = log_lines(result)
+    assert "# commit: unknown" in lines
+    assert "# token: none" in lines
+    assert "# command: privacyfence-sync check workflows/10-imports/10-sf/recipe.yaml" in lines
+
+
+async def test_environment_token_is_reported_as_env_and_never_logged(env):
+    env.venv(lines=["working"])
+    env.env_token = TOKEN
+    result = await env.run()
+    text = result.log_path.read_text()
+    assert "# token: env" in text
+    assert TOKEN not in text
+    assert env.records()[0]["env"]["PRIVACYFENCE_TOKEN"] == TOKEN
