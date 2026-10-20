@@ -108,20 +108,25 @@ class Runner:
             token_source=token.source,
         )
         log_file = self._log_file(recipe, start, run_id)
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        self._history.set_log_path(run_id, log_file.relative_to(self._paths.root).as_posix())
-        venv = self._venvs.current()
-        result_dir = Path(tempfile.mkdtemp(prefix="cockpit-run-")) if mode in _RUN_MODES else None
         replay_file = recipe.dir / REPLAY_FILE
+        result_dir: Path | None = None
+        outcome, exit_code = Outcome.FAILED, None
+        row_finished = False
         try:
             try:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                self._history.set_log_path(run_id, log_file.relative_to(self._paths.root).as_posix())
+                venv = self._venvs.current()
+                result_dir = Path(tempfile.mkdtemp(prefix="cockpit-run-")) if mode in _RUN_MODES else None
                 result_file = None if result_dir is None else result_dir / "result.json"
                 sync = self._venvs.sync_bin(venv) if venv is not None else self._venvs.sync_bin(Path("venv"))
                 nothing_to_replay = mode is Mode.REPLAY and cut_replay(recipe.yaml_path) is None
                 argv = self._argv(sync, recipe, mode, attended, result_file)
                 with log_file.open("w", encoding="utf-8") as log:
                     self._write_header(log, run_id, recipe, mode, trigger, argv, token, commit, start)
-                    problems = cockpit_problems(recipe, self._paths.repo) if mode is Mode.CHECK else []
+                    problems = (
+                        cockpit_problems(recipe, self._paths.repo, self._paths.home) if mode is Mode.CHECK else []
+                    )
                     for problem in problems:
                         self._emit(log, on_line, f"# cockpit check: {problem}")
                     if nothing_to_replay:
@@ -147,11 +152,13 @@ class Runner:
                             outcome = Outcome.RECIPE_ERROR
                     finished = self._clock()
                     self._history.finish(run_id, outcome=outcome, exit_code=exit_code, finished_at=finished, note=note)
+                    row_finished = True
                     self._history.set_pid(run_id, None)
                     self._write_footer(log, exit_code, outcome, start, finished)
-            except Exception as error:  # noqa: BLE001  # any failure must still finish the row and the log
-                outcome, exit_code = Outcome.FAILED, None
-                self._finish_unexpected(run_id, log_file, start, error)
+            except Exception as error:  # any failure must still finish the row and the log
+                if not row_finished:
+                    outcome, exit_code = Outcome.FAILED, None
+                    self._finish_unexpected(run_id, log_file, start, error)
         finally:
             if result_dir is not None:
                 shutil.rmtree(result_dir, ignore_errors=True)
@@ -165,9 +172,13 @@ class Runner:
             run_id, outcome=Outcome.FAILED, exit_code=None, finished_at=finished, note=_unexpected_note(error)
         )
         self._history.set_pid(run_id, None)
-        with log_file.open("a", encoding="utf-8") as log:
-            self._emit(log, None, f"# the run failed unexpectedly: {type(error).__name__}")
-            self._write_footer(log, None, Outcome.FAILED, start, finished)
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with log_file.open("a", encoding="utf-8") as log:
+                self._emit(log, None, f"# the run failed unexpectedly: {type(error).__name__}")
+                self._write_footer(log, None, Outcome.FAILED, start, finished)
+        except OSError:
+            pass  # the log is unwritable (that may be why the run failed); the row already says so
 
     def stop(self, run_id: int) -> bool:
         row = self._history.request_stop(run_id)
@@ -297,19 +308,16 @@ class Runner:
                 await asyncio.to_thread(self._terminate_group, proc.pid)
                 await proc.wait()
         except asyncio.CancelledError:
-            if proc is not None:
-                self._terminate_group(proc.pid, reap=True)
-            finished = self._clock()
-            self._history.finish(
-                run_id, outcome=Outcome.STOPPED, exit_code=None, finished_at=finished, note=SHUTDOWN_NOTE
-            )
-            self._history.set_pid(run_id, None)
-            self._write_footer(log, None, Outcome.STOPPED, finished, finished)
+            self._stopped_by_cancellation(run_id, proc, log)
             raise
-        except Exception as error:  # noqa: BLE001  # the group must not outlive a failed run
+        except Exception as error:  # the group must not outlive a failed run
             if proc is not None:
-                await asyncio.to_thread(self._terminate_group, proc.pid)
-                await proc.wait()
+                try:
+                    await asyncio.to_thread(self._terminate_group, proc.pid)
+                    await proc.wait()
+                except asyncio.CancelledError:
+                    self._stopped_by_cancellation(run_id, proc, log)
+                    raise
                 self._history.set_pid(run_id, None)
             self._emit(log, None, f"# the run failed unexpectedly: {type(error).__name__}")
             return Outcome.FAILED, None, _unexpected_note(error)
@@ -323,6 +331,18 @@ class Runner:
             return self._result_outcome(result_file), exit_code, None
         return EXIT_CODE_OUTCOMES.get(exit_code if exit_code is not None else -1, Outcome.FAILED), exit_code, None
 
+    def _stopped_by_cancellation(
+        self, run_id: int, proc: asyncio.subprocess.Process | None, log: IO[str]
+    ) -> None:
+        if proc is not None:
+            self._terminate_group(proc.pid, reap=True)
+        finished = self._clock()
+        self._history.finish(
+            run_id, outcome=Outcome.STOPPED, exit_code=None, finished_at=finished, note=SHUTDOWN_NOTE
+        )
+        self._history.set_pid(run_id, None)
+        self._write_footer(log, None, Outcome.STOPPED, finished, finished)
+
     async def _pump(
         self, proc: asyncio.subprocess.Process, log: IO[str], on_line: Callable[[str], None] | None
     ) -> None:
@@ -330,11 +350,12 @@ class Runner:
         pending = bytearray()
         dropping = False
         while chunk := await proc.stdout.read(_READ_CHUNK):
-            while chunk:
-                end = chunk.find(b"\n")
-                piece, chunk = (chunk, b"") if end < 0 else (chunk[:end], chunk[end + 1 :])
+            pos = 0
+            while pos < len(chunk):
+                end = chunk.find(b"\n", pos)
+                stop = len(chunk) if end < 0 else end
                 if not dropping:
-                    pending += piece
+                    pending += chunk[pos:stop]
                     if len(pending) > _MAX_LINE_BYTES:
                         del pending[_MAX_LINE_BYTES:]
                         dropping = True
@@ -342,6 +363,7 @@ class Runner:
                     self._emit_line(log, on_line, pending, dropping)
                     pending.clear()
                     dropping = False
+                pos = stop + 1
         if pending or dropping:
             self._emit_line(log, on_line, pending, dropping)
         await proc.wait()

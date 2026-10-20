@@ -1,8 +1,10 @@
 import asyncio
+import io
 import json
 import os
 import shutil
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -474,3 +476,148 @@ async def test_an_unexpected_error_after_start_stops_the_group(env, monkeypatch)
     assert TOKEN not in text
     assert log_lines(result)[-3:][0] == "# exit code: none"
     assert_group_gone(pgids[0])
+
+
+class _FakeStream:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    async def read(self, _size):
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+class _FakeProc:
+    def __init__(self, chunks):
+        self.stdout = _FakeStream(chunks)
+
+    async def wait(self):
+        return 0
+
+
+async def pumped(env, chunks):
+    lines = []
+    await env.runner()._pump(_FakeProc(chunks), io.StringIO(), lines.append)
+    return lines
+
+
+async def test_pump_multibyte_character_split_across_chunks(env):
+    data = "é\n".encode()
+    assert await pumped(env, [data[:1], data[1:]]) == ["é"]
+
+
+async def test_pump_crlf_split_across_chunks(env):
+    assert await pumped(env, [b"ab\r", b"\ncd\r\n"]) == ["ab", "cd"]
+
+
+async def test_pump_final_line_without_newline(env):
+    assert await pumped(env, [b"x\ny"]) == ["x", "y"]
+
+
+async def test_pump_does_not_copy_the_rest_of_the_chunk_per_line(env):
+    class Counting(bytes):
+        sliced = 0
+
+        def __getitem__(self, key):
+            part = super().__getitem__(key)
+            if isinstance(key, slice):
+                type(self).sliced += len(part)
+                return Counting(part)
+            return part
+
+    chunk = Counting(b"\n" * 20_000)
+    assert await pumped(env, [chunk]) == [""] * 20_000
+    assert Counting.sliced <= 2 * len(chunk)
+
+
+async def test_a_failure_before_the_process_still_finishes_the_row_and_log(env, monkeypatch):
+    env.venv()
+    runner = env.runner()
+
+    def boom():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner._venvs, "current", boom)
+    result = await env.run(runner=runner)
+    row = env.history.get(result.run_id)
+    assert result.outcome is Outcome.FAILED
+    assert (row.status, row.outcome, row.pid) == ("finished", Outcome.FAILED, None)
+    assert row.note == "unexpected error: OSError"
+    assert log_lines(result)[-2] == "# outcome: failed"
+
+
+async def test_an_unwritable_log_directory_still_finishes_the_row(env):
+    env.venv()
+    shutil.rmtree(env.paths.logs)
+    env.paths.logs.write_text("not a directory")
+    result = await env.run()
+    row = env.history.get(result.run_id)
+    assert result.outcome is Outcome.FAILED
+    assert (row.status, row.outcome) == ("finished", Outcome.FAILED)
+    assert row.note == "unexpected error: NotADirectoryError"
+
+
+async def test_a_failure_after_the_row_is_finished_keeps_the_real_outcome(env, monkeypatch):
+    env.venv()
+    runner = env.runner()
+    real = env.history.set_pid
+
+    def flaky(run_id, pid):
+        if pid is None:
+            raise OSError("db gone")
+        real(run_id, pid)
+
+    monkeypatch.setattr(env.history, "set_pid", flaky)
+    result = await env.run(runner=runner)
+    row = env.history.get(result.run_id)
+    assert result.outcome is Outcome.OK
+    assert (row.status, row.outcome, row.note) == ("finished", Outcome.OK, None)
+    assert not any(line.startswith("# outcome:") for line in log_lines(result))
+
+
+async def test_a_footer_failure_does_not_finish_the_row_twice(env, monkeypatch):
+    env.venv()
+    runner = env.runner()
+
+    def boom(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "_write_footer", boom)
+    result = await env.run(runner=runner)
+    row = env.history.get(result.run_id)
+    assert result.outcome is Outcome.OK
+    assert (row.outcome, row.note) == (Outcome.OK, None)
+    assert "# the run failed unexpectedly" not in result.log_path.read_text()
+
+
+async def test_cancellation_while_stopping_after_an_error_still_finishes_the_row(env, monkeypatch):
+    env.venv(sleep=5.0)
+    runner = env.runner()
+    real = runner._terminate_group
+    started, release = threading.Event(), threading.Event()
+    pgids = []
+
+    async def boom(proc, log, on_line):
+        pgids.append(proc.pid)
+        raise RuntimeError("x")
+
+    def slow(pgid, reap=False):
+        if not reap:
+            started.set()
+            release.wait(5)
+        real(pgid, reap)
+
+    monkeypatch.setattr(runner, "_pump", boom)
+    monkeypatch.setattr(runner, "_terminate_group", slow)
+    task = asyncio.create_task(env.run(runner=runner))
+    try:
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    row = env.history.get(1)
+    assert (row.status, row.outcome, row.note, row.pid) == ("finished", Outcome.STOPPED, SHUTDOWN_NOTE, None)
+    assert_group_gone(pgids[0])
+    assert next(env.paths.logs.rglob("*.log")).read_text().splitlines()[-2] == "# outcome: stopped"

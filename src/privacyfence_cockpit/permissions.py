@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
+import signal
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -58,13 +61,15 @@ async def collect(recipe: Recipe, runner: Runner, *, timeout: float = 120.0) -> 
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError as error:
         return PermissionsReport(recipe.path, None, f"could not start privacyfence-sync: {error.strerror}")
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:
-        proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
         await proc.wait()
         return PermissionsReport(recipe.path, None, f"privacyfence-sync permissions timed out after {timeout:g} s")
     if proc.returncode != 0:

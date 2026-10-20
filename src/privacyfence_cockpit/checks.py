@@ -8,10 +8,11 @@ from pathlib import Path
 
 import yaml
 
+from privacyfence_cockpit.gitrepo import TIMEOUT_SECONDS, git_env
 from privacyfence_cockpit.recipes import Recipe
 
 
-def cockpit_problems(recipe: Recipe, repo: Path) -> list[str]:
+def cockpit_problems(recipe: Recipe, repo: Path, home: Path | None = None) -> list[str]:
     try:
         document = yaml.safe_load(recipe.yaml_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
@@ -23,11 +24,16 @@ def cockpit_problems(recipe: Recipe, repo: Path) -> list[str]:
     if not work_dir.is_relative_to(recipe.dir.resolve()):
         return [f"work_dir {work} is outside the recipe folder"]
     rel = os.path.relpath(work_dir, repo.resolve())
-    done = subprocess.run(  # noqa: S603  # nosec B603 B607  # fixed argv, no shell
-        ["git", "-C", str(repo), "check-ignore", "-q", f"{rel}/"],  # noqa: S607
-        capture_output=True,
-        check=False,
-    )
+    try:
+        done = subprocess.run(  # noqa: S603  # nosec B603 B607  # fixed argv, no shell
+            ["git", "-C", str(repo), "check-ignore", "-q", f"{rel}/"],  # noqa: S607
+            env=git_env(home or repo),
+            capture_output=True,
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return [f"git check-ignore timed out after {TIMEOUT_SECONDS} seconds"]
     if done.returncode == 0:
         return []
     if done.returncode == 1:
