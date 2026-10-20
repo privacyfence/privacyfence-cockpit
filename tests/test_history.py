@@ -152,3 +152,58 @@ def test_mark_orphans(history):
     assert row.duration_seconds == 300.0
     assert history.get(done).outcome is Outcome.OK
     assert history.mark_orphans(now) == 0
+
+
+def test_export_csv(history):
+    import io
+
+    a = start(history, recipe="imports/a", at=T0 + timedelta(hours=1))
+    b = start(history, recipe="imports/b", at=T0)
+    history.finish(a, outcome=Outcome.OK, exit_code=0, finished_at=T0 + timedelta(hours=1, seconds=5), note="n, 1")
+    out = io.StringIO()
+    assert history.export_csv(HistoryFilter(), out) == 2
+    lines = out.getvalue().splitlines()
+    assert lines[0] == (
+        "id,started_at,finished_at,trigger,recipe,mode,outcome,exit_code,duration_seconds,commit,"
+        "token_source,log_path,note"
+    )
+    assert lines[1].startswith(f"{b},2026-10-20T06:00:00Z,,manual,imports/b,unattended,")
+    assert lines[2] == (
+        f'{a},2026-10-20T07:00:00Z,2026-10-20T07:00:05Z,manual,imports/a,unattended,ok,0,5.0,abc,default,,"n, 1"'
+    )
+    only = io.StringIO()
+    assert history.export_csv(HistoryFilter(recipe="imports/b"), only) == 1
+
+
+def test_set_log_path(history):
+    run = start(history)
+    history.set_log_path(run, "logs/x.log")
+    assert history.get(run).log_path == "logs/x.log"
+
+
+def test_prune_logs(history, tmp_path):
+    import os
+
+    from privacyfence_cockpit.paths import DataPaths
+
+    paths = DataPaths(tmp_path / "data").ensure()
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    for day in ("2026-07-01", "2026-07-22", "2026-10-19"):
+        (paths.logs / day).mkdir()
+        (paths.logs / day / "x.log").write_text("x")
+    (paths.logs / "notes").mkdir()
+    (paths.logs / "stray.txt").write_text("x")
+    venv_logs = paths.logs / "venv"
+    venv_logs.mkdir()
+    old, new = venv_logs / "old.log", venv_logs / "new.log"
+    old.write_text("x")
+    new.write_text("x")
+    stamp = (now - timedelta(days=200)).timestamp()
+    os.utime(old, (stamp, stamp))
+    os.utime(new, ((now - timedelta(days=1)).timestamp(),) * 2)
+    assert history.prune_logs(paths, 90, now) == 2  # 2026-07-01 and old.log; 2026-07-22 is exactly at the cutoff
+    assert not (paths.logs / "2026-07-01").exists()
+    assert (paths.logs / "2026-07-22").exists()
+    assert (paths.logs / "2026-10-19").exists()
+    assert (paths.logs / "notes").exists() and (paths.logs / "stray.txt").exists()
+    assert new.exists() and not old.exists()

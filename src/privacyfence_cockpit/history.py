@@ -2,14 +2,33 @@
 
 from __future__ import annotations
 
+import csv
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import TextIO
 
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.models import Mode, Outcome, iso, parse_iso
+from privacyfence_cockpit.paths import DataPaths
 
 ORPHAN_NOTE = "the cockpit stopped during this run"
+CSV_COLUMNS = (
+    "id",
+    "started_at",
+    "finished_at",
+    "trigger",
+    "recipe",
+    "mode",
+    "outcome",
+    "exit_code",
+    "duration_seconds",
+    "commit",
+    "token_source",
+    "log_path",
+    "note",
+)
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,9 @@ class History:
         assert cursor.lastrowid is not None  # noqa: S101  # nosec B101  # an INSERT always sets it
         return cursor.lastrowid
 
+    def set_log_path(self, run_id: int, log_path: str) -> None:
+        self._db.execute("UPDATE runs SET log_path = ? WHERE id = ?", (log_path, run_id))
+
     def set_pid(self, run_id: int, pid: int | None) -> None:
         self._db.execute("UPDATE runs SET pid = ? WHERE id = ?", (pid, run_id))
 
@@ -188,3 +210,49 @@ class History:
             self.finish(r["id"], outcome=Outcome.FAILED, exit_code=None, finished_at=now, note=ORPHAN_NOTE)
             self.set_pid(r["id"], None)
         return len(rows)
+
+    def export_csv(self, f: HistoryFilter, out: TextIO) -> int:
+        where, params = _where(f)
+        rows = self._db.query(f"SELECT * FROM runs{where} ORDER BY started_at ASC, id ASC", params)  # noqa: S608
+        writer = csv.writer(out, lineterminator="\n")
+        writer.writerow(CSV_COLUMNS)
+        for r in map(_row, rows):
+            writer.writerow(
+                [
+                    r.id,
+                    r.started_at,
+                    r.finished_at,
+                    r.trigger,
+                    r.recipe_path,
+                    r.mode.value,
+                    None if r.outcome is None else r.outcome.value,
+                    r.exit_code,
+                    r.duration_seconds,
+                    r.commit_sha,
+                    r.token_source,
+                    r.log_path,
+                    r.note,
+                ]
+            )
+        return len(rows)
+
+    def prune_logs(self, paths: DataPaths, retention_days: int, now: datetime) -> int:
+        cutoff = (now - timedelta(days=retention_days)).date()
+        removed = 0
+        if paths.logs.is_dir():
+            for folder in paths.logs.iterdir():
+                try:
+                    day = date.fromisoformat(folder.name)
+                except ValueError:
+                    continue
+                if folder.is_dir() and day < cutoff:
+                    shutil.rmtree(folder, ignore_errors=True)
+                    removed += 1
+        venv_logs = paths.logs / "venv"
+        if venv_logs.is_dir():
+            limit = (now - timedelta(days=retention_days)).timestamp()
+            for log in venv_logs.glob("*.log"):
+                if log.is_file() and log.stat().st_mtime < limit:
+                    log.unlink()
+                    removed += 1
+        return removed

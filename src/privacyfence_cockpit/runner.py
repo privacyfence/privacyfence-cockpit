@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
+from privacyfence_cockpit.checks import cockpit_problems
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.gitrepo import GitManager
 from privacyfence_cockpit.history import History
@@ -32,12 +33,14 @@ from privacyfence_cockpit.models import (
 )
 from privacyfence_cockpit.paths import DataPaths
 from privacyfence_cockpit.recipes import Recipe
+from privacyfence_cockpit.replay import REPLAY_FILE, cut_replay
 from privacyfence_cockpit.tokens import ResolvedToken, TokenResolver
 from privacyfence_cockpit.venvs import VenvManager
 
 SHUTDOWN_NOTE = "the cockpit was shut down"
 _POLL_SECONDS = 0.02
-_RUN_MODES = frozenset({Mode.ATTENDED, Mode.UNATTENDED})
+_RUN_MODES = frozenset({Mode.ATTENDED, Mode.UNATTENDED, Mode.REPLAY})
+NOTHING_TO_REPLAY = "nothing to replay: the first step writes"
 
 
 @dataclass(frozen=True)
@@ -82,8 +85,6 @@ class Runner:
         on_line: Callable[[str], None] | None = None,
         attended: bool = False,
     ) -> RunResult:
-        if mode is Mode.REPLAY:
-            raise NotImplementedError("p8")
         token = self._tokens.resolve(recipe)
         eff = self._effective()
         start = self._clock()
@@ -100,26 +101,33 @@ class Runner:
         )
         log_file = self._log_file(recipe, start, run_id)
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        self._history._db.execute(  # the History API sets the path only at start, before the id exists
-            "UPDATE runs SET log_path = ? WHERE id = ?",
-            (log_file.relative_to(self._paths.root).as_posix(), run_id),
-        )
+        self._history.set_log_path(run_id, log_file.relative_to(self._paths.root).as_posix())
         venv = self._venvs.current()
         result_dir = Path(tempfile.mkdtemp(prefix="cockpit-run-")) if mode in _RUN_MODES else None
+        replay_file = recipe.dir / REPLAY_FILE
         try:
             result_file = None if result_dir is None else result_dir / "result.json"
             sync = self._venvs.sync_bin(venv) if venv is not None else self._venvs.sync_bin(Path("venv"))
+            nothing_to_replay = mode is Mode.REPLAY and cut_replay(recipe.yaml_path) is None
             argv = self._argv(sync, recipe, mode, attended, result_file)
             with log_file.open("w", encoding="utf-8") as log:
                 self._write_header(log, run_id, recipe, mode, trigger, argv, token, commit, start)
-                if venv is None:
+                problems = cockpit_problems(recipe, self._paths.repo) if mode is Mode.CHECK else []
+                for problem in problems:
+                    self._emit(log, on_line, f"# cockpit check: {problem}")
+                if nothing_to_replay:
+                    self._emit(log, on_line, f"# {NOTHING_TO_REPLAY}")
+                    outcome, exit_code, note = Outcome.OK, None, NOTHING_TO_REPLAY
+                elif venv is None:
                     reason = self._history_db_setting("venv.last_error") or "no environment has been built"
                     self._emit(log, on_line, f"# the recipe environment is not ready: {reason}")
                     outcome, exit_code, note = Outcome.FAILED, None, None
                 else:
                     outcome, exit_code, note = await self._execute(
-                        run_id, recipe, mode, argv, self._env(venv, eff, token), eff, result_file, log, on_line
+                        run_id, recipe, mode, argv, self._env(venv, eff, token, mode), eff, result_file, log, on_line
                     )
+                    if problems:
+                        outcome = Outcome.RECIPE_ERROR
                 finished = self._clock()
                 self._history.finish(run_id, outcome=outcome, exit_code=exit_code, finished_at=finished, note=note)
                 self._history.set_pid(run_id, None)
@@ -127,6 +135,8 @@ class Runner:
         finally:
             if result_dir is not None:
                 shutil.rmtree(result_dir, ignore_errors=True)
+            if mode is Mode.REPLAY:
+                replay_file.unlink(missing_ok=True)
         return RunResult(run_id=run_id, outcome=outcome, exit_code=exit_code, log_path=log_file)
 
     def stop(self, run_id: int) -> bool:
@@ -146,7 +156,7 @@ class Runner:
     def _argv(
         self, sync: Path, recipe: Recipe, mode: Mode, attended: bool, result_file: Path | None
     ) -> list[str]:
-        yaml = str(recipe.yaml_path)
+        yaml = str(recipe.dir / REPLAY_FILE if mode is Mode.REPLAY else recipe.yaml_path)
         if mode is Mode.CHECK:
             return [str(sync), "check", yaml]
         if mode is Mode.PREFLIGHT:
@@ -156,7 +166,16 @@ class Runner:
             argv.append("--attended")
         return argv
 
-    def _env(self, venv: Path, eff: Effective, token: ResolvedToken) -> dict[str, str]:
+    def command_env(self, recipe: Recipe) -> tuple[Path, dict[str, str]] | None:
+        """The current venv and the environment a privacyfence-sync process gets; None without a venv."""
+        venv = self._venvs.current()
+        if venv is None:
+            return None
+        return venv, self._env(venv, self._effective(), self._tokens.resolve(recipe))
+
+    def _env(
+        self, venv: Path, eff: Effective, token: ResolvedToken, mode: Mode | None = None
+    ) -> dict[str, str]:
         env = {
             "PATH": f"{venv}/bin:/usr/local/bin:/usr/bin:/bin",
             "HOME": str(self._paths.home),
@@ -167,6 +186,8 @@ class Runner:
             env["PRIVACYFENCE_MCP_URL"] = eff.server_url
         if token.value:
             env["PRIVACYFENCE_TOKEN"] = token.value
+        if mode is Mode.REPLAY:
+            env["COCKPIT_REPLAY"] = "1"
         return env
 
     def _write_header(

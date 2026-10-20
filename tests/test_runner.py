@@ -12,7 +12,7 @@ from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import NullSink
 from privacyfence_cockpit.gitrepo import GitManager, no_credentials
-from privacyfence_cockpit.history import History, HistoryFilter
+from privacyfence_cockpit.history import History
 from privacyfence_cockpit.models import RESULT_FILE_OUTCOMES, Mode, Outcome
 from privacyfence_cockpit.paths import DataPaths
 from privacyfence_cockpit.recipes import discover
@@ -42,6 +42,7 @@ class Env:
         recipe_dir = self.repo / "workflows" / "10-imports" / "10-sf"
         recipe_dir.mkdir(parents=True)
         (recipe_dir / "recipe.yaml").write_text("name: fixture\n")
+        (self.repo / ".gitignore").write_text("work/\n")
         git(self.repo, "init", "-b", "main")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-m", "initial")
@@ -135,10 +136,71 @@ async def test_argv_per_mode(env, mode, attended, expected):
     assert argv == [a.format(yaml=yaml, result=result) for a in expected]
 
 
-async def test_replay_is_not_implemented_yet(env):
-    with pytest.raises(NotImplementedError, match="p8"):
-        await env.run(mode=Mode.REPLAY)
-    assert env.history.count(HistoryFilter()) == 0
+def write_recipe(env, text):
+    env.recipe.yaml_path.write_text(text)
+
+
+async def test_replay_argv_env_and_file_cleanup(env):
+    env.venv()
+    write_recipe(env, "name: x\nsteps:\n- id: a\n  tool: drive_list_files\n- id: b\n  tool: gmail_send\n")
+    result = await env.run(mode=Mode.REPLAY)
+    record = env.records()[0]
+    replay = str(env.recipe.dir / ".replay.yaml")
+    assert record["argv"][:2] == ["run", replay]
+    assert "--result-file" in record["argv"]
+    assert "--attended" not in record["argv"]
+    assert record["env"]["COCKPIT_REPLAY"] == "1"
+    assert result.outcome is Outcome.OK
+    assert not (env.recipe.dir / ".replay.yaml").exists()
+
+
+async def test_replay_file_deleted_after_a_failing_run(env):
+    env.venv(exit_code=2, outcome="failed")
+    write_recipe(env, "name: x\nsteps:\n- id: a\n  tool: drive_list_files\n")
+    result = await env.run(mode=Mode.REPLAY)
+    assert result.outcome is Outcome.FAILED
+    assert not (env.recipe.dir / ".replay.yaml").exists()
+
+
+async def test_replay_nothing_to_replay(env):
+    env.venv()
+    write_recipe(env, "name: x\nsteps:\n- id: b\n  tool: gmail_send\n")
+    result = await env.run(mode=Mode.REPLAY)
+    assert result.outcome is Outcome.OK
+    assert result.exit_code is None
+    assert not env.record.exists()
+    assert not (env.recipe.dir / ".replay.yaml").exists()
+    assert env.history.get(result.run_id).note == "nothing to replay: the first step writes"
+    assert "# nothing to replay: the first step writes" in log_lines(result)
+
+
+async def test_check_mode_problem_is_recipe_error(env):
+    env.venv(exit_code=0)
+    (env.repo / ".gitignore").write_text("")
+    write_recipe(env, "name: x\n")
+    result = await env.run(mode=Mode.CHECK)
+    assert result.outcome is Outcome.RECIPE_ERROR
+    assert result.exit_code == 0
+    expected = "# cockpit check: work_dir workflows/10-imports/10-sf/work is not git-ignored"
+    assert any(line.startswith(expected) for line in log_lines(result))
+
+
+async def test_check_mode_without_problem_uses_exit_code(env):
+    env.venv(exit_code=0)
+    write_recipe(env, "name: x\n")
+    result = await env.run(mode=Mode.CHECK)
+    assert result.outcome is Outcome.OK
+    assert not any(line.startswith("# cockpit check:") for line in log_lines(result))
+
+
+def test_command_env(env):
+    runner = env.runner()
+    assert runner.command_env(env.recipe) is None
+    venv = env.venv()
+    found_venv, found_env = runner.command_env(env.recipe)
+    assert found_venv == venv
+    assert found_env["PATH"].startswith(f"{venv}/bin:")
+    assert "COCKPIT_REPLAY" not in found_env
 
 
 async def test_env_has_exactly_the_documented_keys(env):
