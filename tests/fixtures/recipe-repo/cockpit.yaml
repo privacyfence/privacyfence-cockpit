@@ -1,0 +1,6 @@
+version: 1
+timezone: UTC
+schedules:
+  - name: smoke
+    cron: "0 3 * * *"
+    run: [imports]
