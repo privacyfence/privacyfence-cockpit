@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.commit.sha|sha7 }} · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<p><a href="/code">← Code</a></p>
+<h1>Commit <span class="mono">{{ detail.commit.sha|sha7 }}</span></h1>
+<p class="muted">{{ detail.commit.author }} · {{ detail.commit.date|localtime(tz) }}</p>
+<pre class="log">{{ detail.message }}</pre>
+<h2>Changed files</h2>
+{% if detail.files %}
+<table class="data">
+  <tbody>
+  {% for change in detail.files %}
+    <tr>
+      <td class="mono">{{ change.path }}</td>
+      <td>{% if change.added is none %}binary{% else %}<span class="add">+{{ change.added }}</span> <span class="del">−{{ change.deleted }}</span>{% endif %}</td>
+      <td><button type="button" hx-get="/code/commits/{{ detail.commit.sha }}/diff?path={{ change.path|urlencode }}" hx-target="#diff-{{ loop.index }}" hx-swap="innerHTML">Show diff</button></td>
+    </tr>
+    <tr><td colspan="3"><div id="diff-{{ loop.index }}"></div></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No files changed.</p>
+{% endif %}
+{% endblock %}
