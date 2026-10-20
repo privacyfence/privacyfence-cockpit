@@ -1,0 +1,21 @@
+{% macro chip(outcome) -%}
+{%- if outcome -%}
+<span class="chip chip-{{ outcome }}">{{ outcome|outcome_label }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro post_button(action, label, csrf_token, fields={}, cls="") -%}
+<form class="inline" method="post" action="{{ action }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {%- for name, value in fields.items() %}
+  <input type="hidden" name="{{ name }}" value="{{ value }}">
+  {%- endfor %}
+  <button type="submit"{% if cls %} class="{{ cls }}"{% endif %}>{{ label }}</button>
+</form>
+{%- endmacro %}
+
+{% macro field_error(text) -%}
+{%- if text -%}
+<p class="field-error" role="alert">{{ text }}</p>
+{%- endif -%}
+{%- endmacro %}
