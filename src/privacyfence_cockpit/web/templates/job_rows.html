@@ -1,0 +1,25 @@
+{% from "_macros.html" import chip, post_button %}
+<div id="job-rows"{% if active %} hx-get="/jobs/{{ job_id }}/rows" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {% if state == "queued" %}
+  <p>Queued: it starts after the current run. {{ post_button("/jobs/" ~ job_id ~ "/cancel", "Cancel", csrf_token) }}</p>
+  {% endif %}
+  {% if rows %}
+  <table class="data">
+    <thead><tr><th>Run</th><th>Recipe</th><th>Mode</th><th>Outcome</th><th>Started</th><th>Duration</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><a href="/runs/{{ r.id }}">#{{ r.id }}</a></td>
+        <td class="mono">{{ r.recipe_path or "—" }}</td>
+        <td>{{ r.mode.value }}</td>
+        <td>{% if r.outcome %}{{ chip(r.outcome) }}{% else %}<span class="muted">running</span>{% endif %}</td>
+        <td>{{ r.started_at|localtime(tz) }}</td>
+        <td>{% if r.duration_seconds is not none %}{{ "%.1f"|format(r.duration_seconds) }} s{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif state == "running" %}
+  <p class="muted">Starting…</p>
+  {% endif %}
+</div>

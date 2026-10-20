@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chip %}
+{% block title %}History · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>History</h1>
+<form class="actions" method="get" action="/history">
+  <label>Recipe
+    <select name="recipe">
+      <option value="">any</option>
+      {% for r in recipes %}<option value="{{ r }}"{% if used.recipe == r %} selected{% endif %}>{{ r }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Outcome
+    <select name="outcome">
+      <option value="">any</option>
+      {% for value, label in outcomes %}<option value="{{ value }}"{% if used.outcome == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Mode
+    <select name="mode">
+      <option value="">any</option>
+      {% for m in modes %}<option value="{{ m }}"{% if used.mode == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Trigger <input type="text" name="trigger" value="{{ used.trigger or '' }}" placeholder="manual"></label>
+  <label>Since <input type="date" name="since" value="{{ used.since or '' }}"></label>
+  <label>Until <input type="date" name="until" value="{{ used.until or '' }}"></label>
+  <button type="submit" class="primary">Filter</button>
+</form>
+<p class="muted">{{ total }} run(s) · <a href="/history/runs.csv{% if query %}?{{ query }}{% endif %}">Download runs.csv</a></p>
+{% if rows %}
+<table class="data">
+  <thead><tr><th>Run</th><th>Started</th><th>Recipe</th><th>Mode</th><th>Trigger</th><th>Outcome</th><th>Duration</th><th>Note</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{% if r.recipe_path %}<a href="/runs/{{ r.id }}">#{{ r.id }}</a>{% else %}#{{ r.id }}{% endif %}</td>
+      <td>{{ r.started_at|localtime(tz) }}</td>
+      <td class="mono">{{ r.recipe_path or "—" }}</td>
+      <td>{{ r.mode.value }}</td>
+      <td>{{ r.trigger }}</td>
+      <td>{% if r.outcome %}{{ chip(r.outcome) }}{% else %}<span class="muted">running</span>{% endif %}</td>
+      <td>{% if r.duration_seconds is not none %}{{ "%.1f"|format(r.duration_seconds) }} s{% endif %}</td>
+      <td>{{ r.note or "" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No runs match.</p>
+{% endif %}
+{% if pages > 1 %}
+<p class="actions">
+  {% if page > 1 %}<a href="/history?{{ (query ~ "&" if query) }}page={{ page - 1 }}">Previous</a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/history?{{ (query ~ "&" if query) }}page={{ page + 1 }}">Next</a>{% endif %}
+</p>
+{% endif %}
+{% endblock %}
