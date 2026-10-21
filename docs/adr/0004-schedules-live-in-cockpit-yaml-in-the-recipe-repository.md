@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-10-20. Implemented on feature/cockpit-v1.
+Accepted — 2026-10-20. Implemented on feature/cockpit-v1. Amended by [ADR 0008](0008-schedules-can-also-be-made-in-the-dashboard-and-are-stored-in-the-cockpit-database.md): schedules can also be made in the dashboard.
 
 ## Context
 

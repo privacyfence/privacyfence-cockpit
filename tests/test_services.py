@@ -48,7 +48,7 @@ def test_open_creates_layout_canary_and_schema(tmp_path: Path) -> None:
         assert folder.is_dir()
     assert (paths.secrets / "canary.bin").is_file()
     assert (paths.home / ".ssh" / "known_hosts_github").is_file()
-    assert cockpit.db.query_one("PRAGMA user_version")[0] == 1  # type: ignore[index]
+    assert cockpit.db.query_one("PRAGMA user_version")[0] == 2  # type: ignore[index]
     assert cockpit.notifier is not None
 
 

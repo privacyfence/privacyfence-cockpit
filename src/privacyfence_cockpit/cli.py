@@ -503,7 +503,7 @@ def _parser() -> argparse.ArgumentParser:
     schedule = commands.add_parser("schedule", help="inspect the schedules").add_subparsers(
         dest="schedule_command", required=True, metavar="COMMAND"
     )
-    schedule.add_parser("list", help="list the schedules of cockpit.yaml").set_defaults(
+    schedule.add_parser("list", help="list the schedules (cockpit.yaml and the dashboard)").set_defaults(
         handler=_command(_schedule_list)
     )
     git = commands.add_parser("git", help="inspect and update the recipe checkout").add_subparsers(
