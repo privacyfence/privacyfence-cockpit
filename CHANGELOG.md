@@ -10,3 +10,17 @@ turns it into a version heading. The version itself comes from the git tag (setu
 from this file.
 
 ## [Unreleased]
+
+### Added
+
+- The container image and a Docker Compose example.
+- A web dashboard: overview, runs with live logs, history and `runs.csv`, schedules, code browser, tokens,
+  permissions, notifications and settings.
+- Scheduling from `cockpit.yaml` in the recipe repository; missed runs are recorded and notified, not caught up.
+- A git-backed recipe repository, read with a deploy key or an access token and updated only on request.
+- Recipe environments, with the `privacyfence-sync` feature gate.
+- Encrypted secrets, protected by a master key supplied as a Docker secret.
+- Webhook notifications: generic JSON, Slack and ntfy.
+- The `cockpit` command line.
+- The release workflow, publishing a multi-arch image with build provenance.
+- Architecture decision records 0002 to 0007.

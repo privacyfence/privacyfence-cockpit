@@ -1,0 +1,48 @@
+{% from "_macros.html" import post_button %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+  <title>{% block title %}PrivacyFence Cockpit{% endblock %}</title>
+  <link rel="stylesheet" href="/static/cockpit.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/cockpit.js" defer></script>
+</head>
+<body hx-headers='{{ {"X-CSRF-Token": csrf_token}|tojson }}'>
+{% if authenticated %}
+<header class="top">
+  <span class="brand">PrivacyFence Cockpit</span>
+  <nav>
+    {% for key, href, label in [
+      ("", "/", "Overview"),
+      ("history", "/history", "History"),
+      ("schedules", "/schedules", "Schedules"),
+      ("code", "/code", "Code"),
+      ("tokens", "/tokens", "Tokens"),
+      ("permissions", "/permissions", "Permissions"),
+      ("notifications", "/notifications", "Notifications"),
+      ("settings", "/settings", "Settings"),
+    ] %}
+    <a href="{{ href }}"{% if nav == key %} class="current" aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  {{ post_button("/logout", "Log out", csrf_token) }}
+</header>
+{% for banner in banners %}
+<div class="banner banner-{{ banner.level }}" role="status">
+  {{ banner.text }}
+  {% if banner.link %}<a href="{{ banner.link }}">Open</a>{% endif %}
+</div>
+{% endfor %}
+{% endif %}
+<main>
+  {% if flash %}<p class="flash" role="status">{{ flash }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+{% if authenticated %}
+<footer class="foot">PrivacyFence Cockpit {{ version }}</footer>
+{% endif %}
+</body>
+</html>

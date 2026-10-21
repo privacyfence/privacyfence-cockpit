@@ -1,0 +1,23 @@
+services:
+  cockpit:
+    image: ghcr.io/privacyfence/privacyfence-cockpit:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      COCKPIT_PUBLIC_URL: "http://127.0.0.1:8080"
+      COCKPIT_SERVER_URL: "https://privacyfence.example.com/mcp"
+    volumes:
+      - cockpit-data:/data
+    secrets:
+      - cockpit_master_key
+
+volumes:
+  cockpit-data:
+
+secrets:
+  cockpit_master_key:
+    file: ./cockpit_master_key
