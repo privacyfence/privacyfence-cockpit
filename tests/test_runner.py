@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 import pytest
 
 from privacyfence_cockpit import runner as runner_module
+from privacyfence_cockpit.branches import BranchCheckout
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import NullSink
@@ -194,6 +195,32 @@ async def test_check_mode_without_problem_uses_exit_code(env):
     result = await env.run(mode=Mode.CHECK)
     assert result.outcome is Outcome.OK
     assert not any(line.startswith("# cockpit check:") for line in log_lines(result))
+
+
+async def test_branch_run_uses_the_checkout_commit_venv_and_root(env):
+    env.venv()
+    root = env.paths.branches / "feature%2Fx"
+    recipe_dir = root / "workflows" / "10-imports" / "10-sf"
+    recipe_dir.mkdir(parents=True)
+    (recipe_dir / "recipe.yaml").write_text("name: fixture\n")
+    recipe = discover(root)[0]
+    runner = env.runner()
+    checkout = BranchCheckout("feature/x", "b" * 40, root, runner._venvs.current(), None)
+    result = await runner.run(recipe, mode=Mode.UNATTENDED, trigger="manual", job_id="job1", checkout=checkout)
+    lines = log_lines(result)
+    assert f"# commit: {'b' * 40}" in lines
+    assert lines[lines.index(f"# commit: {'b' * 40}") + 1] == "# branch: feature/x"
+    command = "# command: privacyfence-sync run workflows/10-imports/10-sf/recipe.yaml"
+    assert any(line.startswith(command) for line in lines)
+    row = env.history.get(result.run_id)
+    assert (row.branch, row.commit_sha, row.outcome) == ("feature/x", "b" * 40, Outcome.OK)
+
+
+async def test_branch_run_without_an_environment_reports_its_error(env):
+    checkout = BranchCheckout("feature/x", "b" * 40, env.repo, None, "boom")
+    result = await env.run(checkout=checkout)
+    assert "# the recipe environment is not ready: boom" in log_lines(result)
+    assert result.outcome is Outcome.FAILED
 
 
 def test_command_env(env):
