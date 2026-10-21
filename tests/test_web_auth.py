@@ -443,3 +443,23 @@ def test_announce_names_the_public_url(tmp_path: Path, caplog: pytest.LogCapture
     with caplog.at_level(logging.WARNING):
         announce_setup_code(cockpit)
     assert "Open https://cockpit.example.invalid/setup to set one." in caplog.text
+
+
+def test_favicon_is_answered_without_a_redirect_or_a_cookie(cockpit: Cockpit) -> None:
+    response = client(cockpit).get("/favicon.ico", follow_redirects=False)
+    assert response.status_code == 204
+    assert "set-cookie" not in response.headers
+
+
+def test_a_second_render_of_the_form_keeps_the_first_forms_token(cockpit: Cockpit) -> None:
+    # A browser fetching the icon, or a second tab, renders /setup again; the first form must still post.
+    code = new_setup_code(cockpit.db)
+    c = client(cockpit)
+    first = form_token(c.get("/setup").text)
+    assert form_token(c.get("/setup").text) == first
+    response = c.post(
+        "/setup",
+        data={"code": code, "password": NEW_PASSWORD, "confirm": NEW_PASSWORD, "csrf_token": first},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303

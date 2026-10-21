@@ -54,7 +54,7 @@ THROTTLE_FREE_FAILURES = 5
 THROTTLE_BASE_SECONDS = 30
 THROTTLE_MAX_SECONDS = 900
 
-PUBLIC_PATHS = frozenset({"/healthz", "/login", "/setup"})
+PUBLIC_PATHS = frozenset({"/favicon.ico", "/healthz", "/login", "/setup"})
 
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
