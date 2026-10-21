@@ -38,7 +38,7 @@
       <td>{{ r.started_at|localtime(tz) }}</td>
       <td class="mono">{{ r.recipe_path or "—" }}</td>
       <td>{{ r.mode.value }}</td>
-      <td>{{ r.trigger }}</td>
+      <td>{{ r.trigger }}{% if r.branch %} <span class="mono">({{ r.branch }})</span>{% endif %}</td>
       <td>{% if r.outcome %}{{ chip(r.outcome) }}{% else %}<span class="muted">running</span>{% endif %}</td>
       <td>{% if r.duration_seconds is not none %}{{ "%.1f"|format(r.duration_seconds) }} s{% endif %}</td>
       <td>{{ r.note or "" }}</td>

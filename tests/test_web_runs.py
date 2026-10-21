@@ -178,6 +178,106 @@ def test_post_run_defaults_to_unattended(cockpit: Cockpit) -> None:
     assert cockpit.queue.queued()[0].mode is Mode.UNATTENDED
 
 
+def with_branches(cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch, branches: list[str]) -> None:
+    monkeypatch.setattr(cockpit.git, "remote_branches", lambda: branches)
+    monkeypatch.setattr(cockpit.git, "configured_branch", lambda: "main")
+
+
+def test_overview_offers_the_other_branches(cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_branches(cockpit, monkeypatch, ["main", "feature/x"])
+    c, _ = logged_in(cockpit)
+    page = c.get("/").text
+    assert 'name="branch"' in page
+    assert '<option value="">main (configured)</option>' in page
+    assert '<option value="feature/x">feature/x</option>' in page
+    assert '<option value="main">' not in page
+    assert 'name="more"' in page
+
+
+def test_overview_without_other_branches_has_no_branch_select(
+    cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_branches(cockpit, monkeypatch, ["main"])
+    c, _ = logged_in(cockpit)
+    page = c.get("/").text
+    assert 'name="branch"' not in page
+    assert 'name="more"' not in page
+
+
+def test_post_run_with_a_branch_submits_a_branch_job(cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_branches(cockpit, monkeypatch, ["main", "feature/x"])
+    c, token = logged_in(cockpit)
+    c.post("/run", data={"csrf_token": token, "recipe": "imports", "branch": "feature/x"}, follow_redirects=False)
+    (job,) = cockpit.queue.queued()
+    assert (job.branch, job.selectors) == ("feature/x", ("imports",))
+
+
+def test_post_run_with_a_branch_and_more_runs_the_extra_selectors(
+    cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_branches(cockpit, monkeypatch, ["main", "feature/x"])
+    c, token = logged_in(cockpit)
+    c.post(
+        "/run",
+        data={"csrf_token": token, "branch": "feature/x", "more": "imports/new\n\nexports"},
+        follow_redirects=False,
+    )
+    (job,) = cockpit.queue.queued()
+    assert (job.branch, job.selectors) == ("feature/x", ("imports/new", "exports"))
+
+
+def test_post_run_more_without_a_branch_flashes(cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_branches(cockpit, monkeypatch, ["main", "feature/x"])
+    c, token = logged_in(cockpit)
+    c.post("/run", data={"csrf_token": token, "recipe": "imports", "more": "exports"}, follow_redirects=False)
+    assert "Also run needs a branch; tick the recipes instead." in c.get("/").text
+    assert cockpit.queue.queued() == []
+
+
+@pytest.mark.parametrize("branch", ["", "main"])
+def test_post_run_with_the_configured_or_empty_branch_runs_the_checkout(
+    cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch, branch: str
+) -> None:
+    with_branches(cockpit, monkeypatch, ["main", "feature/x"])
+    c, token = logged_in(cockpit)
+    c.post("/run", data={"csrf_token": token, "recipe": "imports", "branch": branch}, follow_redirects=False)
+    assert cockpit.queue.queued()[0].branch is None
+
+
+def test_post_run_with_an_unknown_branch_flashes(cockpit: Cockpit, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_branches(cockpit, monkeypatch, ["main", "feature/x"])
+    c, token = logged_in(cockpit)
+    c.post("/run", data={"csrf_token": token, "recipe": "imports", "branch": "nope"}, follow_redirects=False)
+    assert "Pick a branch from the list." in c.get("/").text
+    assert cockpit.queue.queued() == []
+
+
+def test_run_and_history_pages_show_the_branch(cockpit: Cockpit) -> None:
+    run_id = cockpit.history.start(
+        job_id=None,
+        trigger="manual",
+        recipe_path="imports/10-first",
+        mode=Mode.UNATTENDED,
+        started_at=NOW,
+        log_path=None,
+        commit_sha="a" * 40,
+        token_source=None,
+        branch="feature/x",
+    )
+    c, _ = logged_in(cockpit)
+    assert "<th>Branch</th><td class=\"mono\">feature/x</td>" in c.get(f"/runs/{run_id}").text
+    assert '<span class="mono">(feature/x)</span>' in c.get("/history").text
+
+
+def test_describe_names_the_branch(cockpit: Cockpit) -> None:
+    c, _ = logged_in(cockpit)
+    assert routes_runs._describe(Job(JobKind.RUN, "manual", selectors=("imports",), branch="feature/x")) == (
+        "imports (unattended, manual, branch feature/x)"
+    )
+    cockpit.queue.submit(Job(JobKind.RUN, "manual", selectors=("imports",), branch="feature/x"))
+    assert c.get("/").status_code == 200
+
+
 def test_job_rows_fragment_and_polling_stops_when_finished(cockpit: Cockpit) -> None:
     job = Job(JobKind.RUN, "manual", selectors=("imports",))
     cockpit.queue.submit(job)
