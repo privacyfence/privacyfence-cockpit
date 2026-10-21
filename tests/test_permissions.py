@@ -194,11 +194,22 @@ async def test_collect_non_object_json(env):
 
 
 def _state(pid):
+    # A process that exits while its stat file is open makes the read fail with ProcessLookupError (or return
+    # nothing), not FileNotFoundError; for this helper all of those mean "gone".
     try:
         with open(f"/proc/{pid}/stat") as handle:
             return handle.read().rsplit(")", 1)[1].split()[0]
-    except FileNotFoundError:
+    except (OSError, IndexError):
         return None
+
+
+def test_state_treats_a_process_that_vanishes_mid_read_as_gone(monkeypatch):
+    def vanishing(*args, **kwargs):
+        raise ProcessLookupError(3, "No such process")
+
+    # A module-level name shadows the builtin for _state only, so pytest's own file handling is untouched.
+    monkeypatch.setitem(globals(), "open", vanishing)
+    assert _state(1) is None
 
 
 async def test_collect_timeout_kills_the_children_too(env, tmp_path):
