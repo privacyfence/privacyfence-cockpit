@@ -11,6 +11,13 @@ from this file.
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-10-21
+
+### Changed
+
+- Republished with build provenance. Version 0.0.1 was published without it, because attestations were not
+  available while the repository was private; there are no code changes since 0.0.1.
+
 ## [0.0.1] - 2026-10-21
 
 ### Added
