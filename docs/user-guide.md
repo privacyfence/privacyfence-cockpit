@@ -159,7 +159,7 @@ terminates the recipe's whole process group (SIGTERM, then SIGKILL after 10 seco
 |---|---|
 | ok | The recipe finished and changed something. |
 | no change | The recipe finished and found nothing to do. Counts as success. |
-| recipe error | The recipe is invalid or a step is mis-specified (also: a failed `check`, such as a `work_dir` that is not git-ignored, and a schedule selector that matches nothing). |
+| recipe error | The recipe is invalid or a step is mis-specified (also: a failed `check`, such as a `work_dir` that is not git-ignored, and a schedule selector that matches nothing: the Schedules page and a banner warn about it, and a scheduled firing sends a failure notification). |
 | failed | A step or the sync failed, or the recipe environment is not ready, or the cockpit stopped during the run. |
 | denied | PrivacyFence denied a step. Treat it as a missing rule, not a bug: see the [Permissions](#permissions) page. |
 | not signed in | No usable token. |

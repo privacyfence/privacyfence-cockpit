@@ -22,5 +22,6 @@ from this file.
 - Encrypted secrets, protected by a master key supplied as a Docker secret.
 - Webhook notifications: generic JSON, Slack and ntfy.
 - The `cockpit` command line.
+- A warning banner and a failure notification when a schedule's selectors match no recipe.
 - The release workflow, publishing a multi-arch image with build provenance.
 - Architecture decision records 0002 to 0007.
