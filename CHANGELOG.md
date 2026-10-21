@@ -11,6 +11,10 @@ from this file.
 
 ## [Unreleased]
 
+### Added
+
+- The Overview page has a checkbox on each group that selects all of its recipes, so a whole group can be run with "Run selected".
+
 ## [0.1.0] - 2026-10-21
 
 ### Added

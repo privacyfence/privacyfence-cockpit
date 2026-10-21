@@ -16,7 +16,10 @@
   </thead>
   {% for group, rows in groups %}
   <tbody>
-    <tr><th colspan="5">{{ group }}</th></tr>
+    <tr>
+      <th><input type="checkbox" data-group-toggle aria-label="Select all in {{ group }}"></th>
+      <th colspan="4">{{ group }}</th>
+    </tr>
     {% for row in rows %}
     <tr>
       <td><input type="checkbox" name="recipe" value="{{ row.recipe.path }}" form="run-selected" aria-label="Select {{ row.recipe.path }}"></td>
