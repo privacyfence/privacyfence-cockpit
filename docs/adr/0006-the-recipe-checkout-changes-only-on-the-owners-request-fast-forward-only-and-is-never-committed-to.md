@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-10-20. Implemented on feature/cockpit-v1.
+Accepted — 2026-10-20. Implemented on feature/cockpit-v1. Amended by [ADR 0009](0009-manual-runs-can-use-another-branch-in-its-own-worktree-schedules-always-use-the-configured-checkout.md): manual runs can use another branch.
 
 ## Context
 

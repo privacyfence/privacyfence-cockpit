@@ -11,6 +11,13 @@ from this file.
 
 ## [Unreleased]
 
+### Added
+
+- Manual runs (the dashboard's **Run selected** and `--branch NAME` on the CLI) can use another branch of the
+  recipe repository, in a separate worktree with its own recipe environment; schedules keep using the configured
+  branch ([ADR 0009](docs/adr/0009-manual-runs-can-use-another-branch-in-its-own-worktree-schedules-always-use-the-configured-checkout.md)).
+  The database schema is now version 3 (a `branch` column on runs); an existing database is upgraded on start.
+
 ## [0.1.0] - 2026-10-21
 
 ### Added
