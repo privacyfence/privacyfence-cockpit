@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = """
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -51,7 +51,9 @@ CREATE TABLE ui_schedules (name TEXT PRIMARY KEY, cron TEXT NOT NULL, run_json T
   repeat INTEGER NOT NULL DEFAULT 1, stop_on_error INTEGER NOT NULL DEFAULT 0, changed_at TEXT NOT NULL);
 """
 
-_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+_SCHEMA_V3 = "ALTER TABLE runs ADD COLUMN branch TEXT;"
+
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
 
 
 class DatabaseError(RuntimeError):

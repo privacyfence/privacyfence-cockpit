@@ -1,6 +1,6 @@
 import stat
 
-from privacyfence_cockpit.paths import DataPaths
+from privacyfence_cockpit.paths import DataPaths, branch_folder
 
 
 def test_layout(tmp_path):
@@ -13,6 +13,14 @@ def test_layout(tmp_path):
     assert paths.home == tmp_path / "home"
     assert paths.run_lock == tmp_path / "run.lock"
     assert paths.git_lock == tmp_path / "git.lock"
+
+
+def test_branch_paths_and_folder_names(tmp_path):
+    paths = DataPaths(tmp_path)
+    assert paths.branches == tmp_path / "branches"
+    assert paths.branch_venvs == tmp_path / "branch-venvs"
+    assert branch_folder("feature/x/y") == "feature%2Fx%2Fy"
+    assert branch_folder("main") == "main"
 
 
 def test_ensure_creates_private_folders_but_not_repo(tmp_path):
