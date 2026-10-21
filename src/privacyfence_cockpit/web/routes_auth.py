@@ -42,9 +42,12 @@ def _throttle(request: Request) -> LoginThrottle:
 
 
 def _form_page(request: Request, template: str, error: str | None = None, status_code: int = 200) -> Response:
-    """Renders /login or /setup with the double-submit CSRF token, reusing the cookie on a re-render."""
-    token = request.cookies.get(CSRF_COOKIE) if error is not None else None
-    token = token or secrets.token_urlsafe(32)
+    """Renders /login or /setup with the double-submit CSRF token, reusing the cookie when there is one.
+
+    Reusing it matters: a second render (a reload, a second tab) must not replace the token of a form that
+    is already on screen, or that form's POST no longer matches the cookie.
+    """
+    token = request.cookies.get(CSRF_COOKIE) or secrets.token_urlsafe(32)
     response = render(request, template, {"csrf_token": token, "error": error}, status_code)
     set_csrf_cookie(response, token, secure=_cockpit(request).env.secure_cookies)
     return response

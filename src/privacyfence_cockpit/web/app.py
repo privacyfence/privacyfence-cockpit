@@ -65,6 +65,12 @@ def sha7(value: str | None) -> str:
     return (value or "")[:7]
 
 
+async def favicon(request: Request) -> Response:
+    # Browsers ask for the icon on every first visit; answering it keeps the auth redirect, and the cookie
+    # the redirected /setup or /login would set, out of that request.
+    return Response(status_code=204)
+
+
 async def healthz(request: Request) -> Response:
     try:
         request.app.state.cockpit.db.query_one("SELECT 1")
@@ -93,6 +99,7 @@ def create_app(cockpit: Cockpit, *, start_background: bool = True) -> Starlette:
         *routes_permissions.ROUTES,
         *routes_notifications.ROUTES,
         *routes_settings.ROUTES,
+        Route("/favicon.ico", favicon),
         Route("/healthz", healthz),
         Mount("/static", StaticFiles(packages=[("privacyfence_cockpit.web", "static")]), name="static"),
     ]

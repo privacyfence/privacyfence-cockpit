@@ -11,6 +11,15 @@ from this file.
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-10-21
+
+### Fixed
+
+- Setting the password on first start (and logging in) failed with "Invalid or missing CSRF token" when the
+  browser asked for `/favicon.ico` while the form was open: the icon request was redirected to the form page,
+  which replaced the CSRF cookie. The icon is now answered with an empty response, and the form pages keep an
+  existing CSRF cookie.
+
 ## [0.0.2] - 2026-10-21
 
 ### Changed
