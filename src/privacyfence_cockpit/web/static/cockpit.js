@@ -37,6 +37,30 @@
     });
   }
 
+  function syncGroup(body) {
+    var toggle = body.querySelector("[data-group-toggle]");
+    var boxes = body.querySelectorAll("input[name=recipe]");
+    var checked = body.querySelectorAll("input[name=recipe]:checked").length;
+    toggle.checked = boxes.length > 0 && checked === boxes.length;
+    toggle.indeterminate = checked > 0 && checked < boxes.length;
+  }
+
+  document.addEventListener("change", function (event) {
+    var target = event.target;
+    var body = target.closest ? target.closest("tbody") : null;
+    if (!body || !body.querySelector("[data-group-toggle]")) {
+      return;
+    }
+    if (target.hasAttribute("data-group-toggle")) {
+      body.querySelectorAll("input[name=recipe]").forEach(function (box) {
+        box.checked = target.checked;
+      });
+      target.indeterminate = false;
+    } else if (target.name === "recipe") {
+      syncGroup(body);
+    }
+  });
+
   document.addEventListener("DOMContentLoaded", function () {
     var log = document.querySelector("#log[data-events]");
     if (log) {
