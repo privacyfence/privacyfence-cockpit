@@ -281,7 +281,7 @@ def test_checkout_failures(cloned):
     db.set_setting("git.branch", "nope")
     with pytest.raises(GitError, match="git checkout failed"):
         manager.track()
-    with pytest.raises(GitError, match="git log failed"):
+    with pytest.raises(GitError, match="The remote has no branch 'nope'"):
         manager.log()
     assert manager.status().remote_tip is None
 
@@ -385,3 +385,14 @@ def test_fetch_timeout_counts_as_failure(cloned, monkeypatch):
     with pytest.raises(GitError, match="timed out"):
         manager.fetch()
     assert "timed out" in db.get_setting("git.last_fetch_error")
+
+
+def test_fetch_before_the_clone_is_refused_without_recording_a_failure(env):
+    manager, _, db, _, sink, _ = env
+    with pytest.raises(GitError, match="has not been cloned"):
+        manager.fetch()
+    assert db.get_setting("git.last_fetch_error") is None
+    assert db.get_setting("git.failing_since") is None
+    assert db.get_setting("git.last_fetch_attempt_at") is None
+    assert sink.events == []
+

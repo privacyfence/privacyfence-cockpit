@@ -205,6 +205,8 @@ async def _fetch(cockpit: Cockpit) -> None:
 async def fetch_now(request: Request) -> Response:
     await require_csrf(request)
     cockpit = _cockpit(request)
+    if not cockpit.git.status().cloned:
+        return redirect("/code", "The repository has not been cloned yet: use Clone first.")
     task: asyncio.Task[None] | None = getattr(request.app.state, "code_fetch_task", None)
     if task is not None and not task.done():
         return redirect("/code", "Already fetching…")

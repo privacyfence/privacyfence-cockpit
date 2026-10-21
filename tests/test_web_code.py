@@ -374,3 +374,12 @@ def test_pending_keys_setting_roundtrip(tmp_path: Path) -> None:
     from privacyfence_cockpit.web.routes_code import _pending_keys
 
     assert _pending_keys(cockpit)[0].host == "h"
+
+
+def test_fetch_now_before_the_clone_says_to_clone_first(tmp_path: Path) -> None:
+    cockpit, c, token, _ = setup(tmp_path, clone=False)
+    assert 'action="/code/fetch"' not in c.get("/code").text
+    response = post(c, token, "/code/fetch")
+    assert "use Clone first" in follow_flash(c, response)
+    assert getattr(c.app.state, "code_fetch_task", None) is None
+    assert cockpit.db.get_setting("git.last_fetch_error") is None
