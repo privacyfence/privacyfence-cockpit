@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def branch_folder(branch: str) -> str:
+    """The folder name of a branch's worktree; `%` cannot occur in a branch name, so this is reversible."""
+    return branch.replace("/", "%2F")
+
+
 @dataclass(frozen=True)
 class DataPaths:
     root: Path
@@ -17,6 +22,14 @@ class DataPaths:
     @property
     def venvs(self) -> Path:
         return self.root / "venvs"
+
+    @property
+    def branches(self) -> Path:
+        return self.root / "branches"
+
+    @property
+    def branch_venvs(self) -> Path:
+        return self.root / "branch-venvs"
 
     @property
     def logs(self) -> Path:
