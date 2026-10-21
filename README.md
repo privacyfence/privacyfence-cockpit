@@ -11,10 +11,9 @@ in the [architecture decision records](docs/adr/README.md). See also [0002](docs
 - The checkout changes only when you ask (or before scheduled runs, if you turn that on), and only by fast-forward.
 - A `cockpit` command line in the same image for everything the dashboard does, and more.
 
-> **Status.** The image and release workflows (`image.yml`, `release.yml`) are written but have not run successfully
-> yet: `image.yml` currently ends in `startup_failure`, which the maintainer is investigating, and no release has been
-> cut. This README describes the image as designed. The checks that still need a real host are listed under
-> [Verification status](#verification-status).
+> **Status.** The image builds and passes its smoke test in CI (`image.yml`), but no release has been cut yet, so
+> `release.yml` has not run, and the image has not been tried against a real PrivacyFence server. The checks that still
+> need a real host are listed under [Verification status](#verification-status).
 
 ## Quick start
 
@@ -109,11 +108,14 @@ A wrong value stops the start with a one-line message such as `COCKPIT_LISTEN_PO
 What is covered by automated tests: everything in the Python package, against a fake `privacyfence-sync` and an
 in-process fake MCP server.
 
+What has been proven in CI: the `image.yml` workflow built the image for amd64 and arm64, and for amd64 it started the
+image and ran `cockpit check` on a fixture repository (`scripts/smoke_image.sh`). The run on 2026-10-20, dispatched on
+the `feature/cockpit-v1` branch before it was merged, passed.
+
 What is not yet proven, because the container this was written in had no Docker and the release has not been cut:
 
-- The image and the compose file have not been built or started by the project's workflows. The `image.yml` workflow
-  builds the image, starts it and runs `cockpit check` on a fixture repository (`scripts/smoke_image.sh`); it has not
-  completed a run yet.
+- The compose file has not been started by the project's workflows, and the image has not been run against a real
+  PrivacyFence server.
 - The release process in [Releasing](docs/releasing.md) (`release.yml`: tag, multi-arch push to GHCR, provenance) has
   not run.
 - The token check assumes that `privacyfence_status` returns a `token` object with `label`, `expires_at`, `days_left`
