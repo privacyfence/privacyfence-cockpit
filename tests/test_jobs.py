@@ -284,6 +284,21 @@ async def test_unknown_selector_records_a_recipe_error_row(env):
     assert not env.record.exists()
 
 
+async def test_scheduled_unknown_selector_emits_one_run_failed(env):
+    summary = await env.worker().execute(run_job(trigger="schedule:nightly", selectors=("nope", "imports/zzz")))
+    [event] = env.events.events
+    assert event.kind is EventKind.RUN_FAILED
+    assert (event.recipe, event.schedule, event.outcome) == ("nope, imports/zzz", "nightly", Outcome.RECIPE_ERROR)
+    assert (event.exit_code, event.run_id) == (None, summary.run_ids[0])
+    [row] = env.rows()
+    assert row.outcome is Outcome.RECIPE_ERROR
+
+
+async def test_manual_unknown_selector_emits_nothing(env):
+    await env.worker().execute(run_job(selectors=("nope",)))
+    assert env.events.events == []
+
+
 async def test_attended_flag_reaches_preflight(env):
     await env.worker().execute(
         Job(JobKind.RUN, "manual", selectors=("imports/10-one",), mode=Mode.PREFLIGHT, attended=True)
