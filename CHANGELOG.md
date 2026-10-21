@@ -11,6 +11,8 @@ from this file.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-21
+
 ### Added
 
 - Schedules can be created, edited and deleted on the Schedules page. They are stored in the cockpit's
