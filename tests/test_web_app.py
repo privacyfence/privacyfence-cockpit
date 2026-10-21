@@ -90,6 +90,61 @@ def test_banner_discovery_error(cockpit: Cockpit) -> None:
     assert found[0].link is None
 
 
+def write_schedules(cockpit: Cockpit, selectors: list[str]) -> None:
+    (cockpit.paths.repo / "workflows" / "10-imports" / "10-a").mkdir(parents=True)
+    (cockpit.paths.repo / "workflows" / "10-imports" / "10-a" / "recipe.yaml").write_text("version: 1\n")
+    lines = ["version: 1", "schedules:"]
+    for i, selector in enumerate(selectors):
+        lines += [f"  - name: s{i}", '    cron: "0 3 * * *"', f"    run: [{selector}]"]
+    (cockpit.paths.repo / "cockpit.yaml").write_text("\n".join(lines) + "\n")
+
+
+def selector_banners(cockpit: Cockpit) -> list:
+    return [b for b in banners(cockpit) if b.text.startswith("Schedule selectors match no recipe")]
+
+
+def test_banner_schedule_selectors_match_nothing(cockpit: Cockpit) -> None:
+    write_schedules(cockpit, ["imports", "nope"])
+    [banner] = selector_banners(cockpit)
+    assert (banner.level, banner.link) == ("warning", "/schedules")
+    assert banner.text == "Schedule selectors match no recipe: schedule s1: no recipe or group matches 'nope'"
+    names = [b.text for b in banners(cockpit)]
+    assert names.index(banner.text) == names.index("No recipe repository yet.") + 1
+
+
+def test_banner_schedule_selectors_cap_at_three(cockpit: Cockpit) -> None:
+    write_schedules(cockpit, ["a", "b", "c", "d", "e"])
+    [banner] = selector_banners(cockpit)
+    assert banner.text == (
+        "Schedule selectors match no recipe: schedule s0: no recipe or group matches 'a'; "
+        "schedule s1: no recipe or group matches 'b'; schedule s2: no recipe or group matches 'c' (and 2 more)"
+    )
+
+
+def test_banner_schedule_selectors_absent_when_they_match(cockpit: Cockpit) -> None:
+    write_schedules(cockpit, ["imports", "imports/10-a"])
+    assert selector_banners(cockpit) == []
+
+
+def test_banner_schedule_selectors_absent_on_cockpit_yaml_error(cockpit: Cockpit) -> None:
+    cockpit.paths.repo.mkdir()
+    (cockpit.paths.repo / "cockpit.yaml").write_text("version: 2\n")
+    assert selector_banners(cockpit) == []
+    assert [b for b in banners(cockpit) if b.text.startswith("cockpit.yaml: ")]
+
+
+def test_banner_schedule_selector_check_never_breaks_rendering(cockpit: Cockpit, monkeypatch) -> None:
+    write_schedules(cockpit, ["nope"])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("privacyfence_cockpit.web.context.selector_problems", boom)
+    assert selector_banners(cockpit) == []
+    c, _ = logged_in(cockpit)
+    assert c.get("/").status_code == 200
+
+
 def test_banner_pinned(cockpit: Cockpit) -> None:
     cockpit.db.set_setting("git.repo_url", "https://example.com/r.git")
     cockpit.db.set_setting("git.branch", "main")

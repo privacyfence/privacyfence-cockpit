@@ -247,4 +247,16 @@ class Worker:
             token_source=None,
         )
         self._history.finish(run_id, outcome=Outcome.RECIPE_ERROR, exit_code=None, finished_at=now, note=message)
+        if job.trigger.startswith(SCHEDULE_PREFIX):
+            self._events.emit(
+                Event(
+                    EventKind.RUN_FAILED,
+                    now,
+                    recipe=", ".join(job.selectors) or "(all recipes)",
+                    schedule=job.trigger.removeprefix(SCHEDULE_PREFIX),
+                    outcome=Outcome.RECIPE_ERROR,
+                    exit_code=None,
+                    run_id=run_id,
+                )
+            )
         return run_id

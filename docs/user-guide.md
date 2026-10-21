@@ -159,7 +159,7 @@ terminates the recipe's whole process group (SIGTERM, then SIGKILL after 10 seco
 |---|---|
 | ok | The recipe finished and changed something. |
 | no change | The recipe finished and found nothing to do. Counts as success. |
-| recipe error | The recipe is invalid or a step is mis-specified (also: a failed `check`, such as a `work_dir` that is not git-ignored, and a schedule selector that matches nothing). |
+| recipe error | The recipe is invalid or a step is mis-specified (also: a failed `check`, such as a `work_dir` that is not git-ignored, and a schedule selector that matches nothing: a warning banner on every page links to the Schedules page, and a scheduled firing sends a failure notification). |
 | failed | A step or the sync failed, or the recipe environment is not ready, or the cockpit stopped during the run. |
 | denied | PrivacyFence denied a step. Treat it as a missing rule, not a bug: see the [Permissions](#permissions) page. |
 | not signed in | No usable token. |
@@ -354,8 +354,9 @@ To restore, put the files back into an empty volume and start the container with
   `requirements.txt` and checks that `privacyfence-sync run` accepts `--result-file` and `privacyfence-sync permissions`
   accepts `--json`. Pin a privacyfence-sync version that does. Other messages in that banner: `requirements.txt must pin
   privacyfence-sync (privacyfence-sync==X.Y.Z)`, `the recipe repository has no requirements.txt`, and `pip install
-  failed with exit code N; see logs/venv/<hash>.log` (the log is in `/data/logs/venv/`). Until it is fixed, runs end as
-  `failed` with `the recipe environment is not ready`. A webhook notification is sent once per failure.
+  failed with exit code N; see logs/venv/<hash>.log` (the log is in `/data/logs/venv/`). Until it is fixed, runs keep using the
+  previous environment if one was built earlier; if there is none, they end as `failed` with `the recipe environment is
+  not ready`. A webhook notification is sent once per failure.
 - **Banner `Fetching the recipe repository fails: …`** — look at `Fetch error` on the Code page: a wrong deploy key, a
   host that is not trusted yet, an expired token.
 - **Banner `cockpit.yaml: …`** — fix the file; the message names the key. Scheduling resumes at the next tick.

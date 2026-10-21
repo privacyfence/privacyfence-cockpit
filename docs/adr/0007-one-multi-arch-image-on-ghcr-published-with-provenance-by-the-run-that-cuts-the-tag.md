@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted — 2026-10-20. The decision is accepted and the workflows are written, but the pipeline is not proven:
-`image.yml` currently ends in `startup_failure` and neither `image.yml` nor `release.yml` has run successfully.
+Accepted — 2026-10-20. The decision is accepted. The build half of the pipeline is proven: `image.yml` built the image for
+amd64 and arm64 and passed its smoke test in CI. The publishing half is not: `release.yml` (tag, push to GHCR,
+provenance) has not run yet.
 
 ## Context
 
