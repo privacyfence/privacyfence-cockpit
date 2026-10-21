@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_macros.html" import field_error %}
+{% block title %}{{ "Edit" if editing else "New" }} schedule · PrivacyFence Cockpit{% endblock %}
+{% block content %}
+<h1>{% if editing %}Edit schedule {{ values.name }}{% else %}New schedule{% endif %}</h1>
+<form class="card" method="post" action="{{ '/schedules/' ~ values.name ~ '/edit' if editing else '/schedules/new' }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ field_error(error) }}
+  <p>
+    <label>Name <input type="text" name="name" value="{{ values.name }}" pattern="[a-z0-9][a-z0-9\-]{0,40}" maxlength="41" autocomplete="off" required{% if editing %} readonly{% endif %}></label><br>
+    <span class="muted">Lowercase letters, digits and dashes.{% if editing %} A name cannot be changed.{% endif %}</span>
+  </p>
+  <p>
+    <label>Cron <input type="text" name="cron" class="mono" value="{{ values.cron }}" placeholder="0 3 * * *" autocomplete="off" required></label><br>
+    <span class="muted">Five fields (minute hour day month weekday), in <span class="mono">{{ tz }}</span>.</span>
+  </p>
+  <p>
+    <label>Recipes or groups to run<br>
+    <textarea name="run" rows="4" class="mono" placeholder="imports&#10;transformations/10-derive-tables" required>{{ values.run }}</textarea></label><br>
+    <span class="muted">One per line, in the form <code>cockpit run</code> takes. They always run in recipe order.</span>
+  </p>
+  <p>
+    <label>Repeat <input type="number" name="repeat" value="{{ values.repeat }}" min="1" max="100" required></label>
+  </p>
+  <p>
+    <label><input type="checkbox" name="stop_on_error" value="1"{% if values.stop_on_error %} checked{% endif %}> Stop at the first recipe that fails</label>
+  </p>
+  <p><button type="submit">Save</button> <a href="/schedules">Cancel</a></p>
+</form>
+{% endblock %}

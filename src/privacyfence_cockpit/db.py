@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_V1 = """
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -46,6 +46,13 @@ CREATE TABLE permissions_reports (recipe_path TEXT PRIMARY KEY, commit_sha TEXT,
   report_json TEXT, error TEXT);
 """
 
+_SCHEMA_V2 = """
+CREATE TABLE ui_schedules (name TEXT PRIMARY KEY, cron TEXT NOT NULL, run_json TEXT NOT NULL,
+  repeat INTEGER NOT NULL DEFAULT 1, stop_on_error INTEGER NOT NULL DEFAULT 0, changed_at TEXT NOT NULL);
+"""
+
+_MIGRATIONS = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+
 
 class DatabaseError(RuntimeError):
     pass
@@ -68,8 +75,9 @@ class Database:
                 raise DatabaseError(f"cockpit.db was written by a newer cockpit (schema {version})")
             if version == SCHEMA_VERSION:
                 return
+            steps = "\n".join(_MIGRATIONS[v] for v in range(version + 1, SCHEMA_VERSION + 1))
             # executescript commits any open transaction first, so make this one atomic by hand.
-            self._conn.executescript(f"BEGIN;\n{_SCHEMA_V1}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;")
+            self._conn.executescript(f"BEGIN;\n{steps}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;")
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
         with self._lock:

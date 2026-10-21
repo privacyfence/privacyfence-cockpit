@@ -11,6 +11,13 @@ from this file.
 
 ## [Unreleased]
 
+### Added
+
+- Schedules can be created, edited and deleted on the Schedules page. They are stored in the cockpit's
+  database next to the schedules of `cockpit.yaml`, which stay read-only there
+  ([ADR 0008](docs/adr/0008-schedules-can-also-be-made-in-the-dashboard-and-are-stored-in-the-cockpit-database.md)).
+  The database schema is now version 2; an existing database is upgraded on start.
+
 ## [0.0.3] - 2026-10-21
 
 ### Fixed

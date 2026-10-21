@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from privacyfence_cockpit.cockpit_yaml import CockpitConfig, CockpitConfigError, load_cockpit_yaml
@@ -22,6 +23,7 @@ from privacyfence_cockpit.paths import DataPaths
 from privacyfence_cockpit.recipes import DiscoveryError, Recipe, discover
 from privacyfence_cockpit.runlock import RunLock
 from privacyfence_cockpit.runner import Runner
+from privacyfence_cockpit.schedule_store import ScheduleStore
 from privacyfence_cockpit.scheduler import Scheduler
 from privacyfence_cockpit.secrets_store import SecretStore
 from privacyfence_cockpit.token_check import TokenChecker
@@ -73,6 +75,7 @@ class Cockpit:
             effective=self.effective,
             clock=clock,
         )
+        self.schedule_store = ScheduleStore(db, clock)
         self.queue = JobQueue()
         self.lock = RunLock(paths.run_lock)
         self.worker = Worker(
@@ -116,7 +119,11 @@ class Cockpit:
             return []
 
     def config(self) -> CockpitConfig:
-        return load_cockpit_yaml(self.paths.repo)
+        """cockpit.yaml plus the schedules made in the dashboard; on a name clash the file wins."""
+        config = load_cockpit_yaml(self.paths.repo)
+        taken = {s.name for s in config.schedules}
+        own = tuple(s for s in self.schedule_store.all() if s.name not in taken)
+        return replace(config, schedules=config.schedules + own)
 
     def config_or_default(self) -> tuple[CockpitConfig, str | None]:
         try:

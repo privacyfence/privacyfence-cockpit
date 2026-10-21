@@ -183,9 +183,13 @@ are deleted daily; the history rows stay and the run page then shows `log delete
 
 ## Schedules
 
-Schedules are defined in `cockpit.yaml` in the recipe repository and are read-only in the dashboard. Each has a name, a
-cron expression in the effective timezone, a list of recipes or groups to run, an optional repeat count and an
-optional stop-on-error. See [the `cockpit.yaml` reference](recipe-repository.md#cockpityaml).
+Schedules come from two places. Those in `cockpit.yaml` in the recipe repository are reviewed with the recipes and are
+read-only in the dashboard (see [the `cockpit.yaml` reference](recipe-repository.md#cockpityaml)). Those made on the
+Schedules page with **New schedule** are stored in the cockpit's database, can be edited and deleted there, and are lost
+with the volume; put a schedule in `cockpit.yaml` if it must be reviewed or survive that. Both kinds have a name, a cron
+expression in the effective timezone, a list of recipes or groups to run (one per line), an optional repeat count and an
+optional stop-on-error. A name cannot be changed after it is saved, and every recipe or group must exist when you save.
+If a dashboard schedule has the name of one in `cockpit.yaml`, the file wins and the page says the dashboard one is unused.
 
 The **Schedules** page shows each schedule's next run, whether it is active or paused, and its last run, with **Pause**,
 **Resume** and **Run now**. Pausing is stored in the cockpit's database, not in `cockpit.yaml`. **Run now** queues the
@@ -196,7 +200,7 @@ schedule's recipes as a manual job.
 - **Missed fires are recorded, never caught up.** If the cockpit was down when a fire was due (more than 90 seconds
   late), one `missed` row per schedule says how many runs were missed and between when, the Schedules page lists them
   under **Missed runs**, and a notification goes out. The cockpit does not run them afterwards.
-- A problem in `cockpit.yaml` shows as an error banner and pauses scheduling until it is fixed.
+- A problem in `cockpit.yaml` shows as an error banner and pauses all scheduling, dashboard schedules included, until it is fixed.
 
 ## The Code page and the update model
 
