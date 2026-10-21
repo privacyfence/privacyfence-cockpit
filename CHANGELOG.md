@@ -11,6 +11,8 @@ from this file.
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-10-21
+
 ### Added
 
 - The container image and a Docker Compose example.
