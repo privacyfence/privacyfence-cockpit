@@ -11,6 +11,8 @@ from this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Added
 
 - Manual runs (the dashboard's **Run selected** and `--branch NAME` on the CLI) can use another branch of the
