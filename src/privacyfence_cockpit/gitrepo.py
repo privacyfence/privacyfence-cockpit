@@ -159,6 +159,9 @@ class GitManager:
             raise GitError(f"git clone failed: {_first_line(result.stderr)}")
 
     def fetch(self) -> None:
+        if not self._cloned():
+            # Nothing to fetch into; this is not a fetch failure, so it is neither recorded nor notified.
+            raise GitError("The repository has not been cloned.")
         now = self._clock()
         self._db.set_setting("git.last_fetch_attempt_at", iso(now))
         try:
@@ -179,6 +182,10 @@ class GitManager:
 
     def log(self, limit: int = 200) -> list[Commit]:
         branch = self._require_branch()
+        if self._rev_parse(f"origin/{branch}") is None:
+            raise GitError(
+                f"The remote has no branch '{branch}'. Check the branch name, or push a first commit to it."
+            )
         out = self._checked(
             "log", "--format=%H%x1f%an%x1f%aI%x1f%s%x1e", "-n", str(limit), f"origin/{branch}"
         ).stdout

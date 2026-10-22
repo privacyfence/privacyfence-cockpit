@@ -119,8 +119,8 @@
 </div>
 
 <div class="actions">
-  {{ post_button("/code/fetch", "Fetch now", csrf_token) }}
   {% if status.cloned %}
+  {{ post_button("/code/fetch", "Fetch now", csrf_token) }}
   {{ post_button("/code/update", "Update to latest", csrf_token, cls="primary") }}
   {% if status.pinned_sha %}{{ post_button("/code/track", "Return to tracking", csrf_token) }}{% endif %}
   {% endif %}

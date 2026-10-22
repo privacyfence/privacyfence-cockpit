@@ -28,6 +28,15 @@ from this file.
   ([ADR 0008](docs/adr/0008-schedules-can-also-be-made-in-the-dashboard-and-are-stored-in-the-cockpit-database.md)).
   The database schema is now version 2; an existing database is upgraded on start.
 
+## [0.0.4] - 2026-10-21
+
+### Fixed
+
+- **Fetch now** before the first clone no longer stores a fetch failure and shows a banner: the button appears
+  only once the repository is cloned, and the server answers `The repository has not been cloned.` instead.
+- The Code page says `The remote has no branch '<name>'. Check the branch name, or push a first commit to it.`
+  when the configured branch does not exist on the remote, instead of a raw `git log` error.
+
 ## [0.0.3] - 2026-10-21
 
 ### Fixed
