@@ -130,3 +130,114 @@ def test_lists_only_the_twenty_newest_missed_rows(tmp_path: Path) -> None:
     page = c.get("/schedules").text
     assert "note-21" in page and "note-02" in page
     assert "note-01" not in page and "note-00" not in page
+
+
+def form(**overrides: str) -> dict[str, str]:
+    data = {
+        "name": "nightly",
+        "cron": " 0   4 * * * ",
+        "run": "imports\nimports/10-sf",
+        "repeat": "3",
+        "stop_on_error": "1",
+    }
+    return {**data, **overrides}
+
+
+def test_create_a_schedule_in_the_dashboard(tmp_path: Path) -> None:
+    cockpit, c, token = setup(tmp_path)
+    assert "New schedule" in c.get("/schedules/new").text
+    response = c.post("/schedules/new", data={"csrf_token": token, **form()}, follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/schedules"
+    stored = cockpit.schedule_store.get("nightly")
+    assert stored is not None
+    assert (stored.cron, stored.run, stored.repeat, stored.stop_on_error) == (
+        "0 4 * * *",
+        ("imports", "imports/10-sf"),
+        3,
+        True,
+    )
+    page = c.get("/schedules").text
+    assert "nightly" in page and "dashboard" in page and "2026-10-21 04:00 Europe/Budapest" in page
+    assert "/schedules/nightly/edit" in page and "/schedules/nightly/delete" in page
+    assert "/schedules/daily/edit" not in page  # cockpit.yaml schedules are not editable here
+    assert [s.name for s in cockpit.config().schedules] == ["daily", "weekly", "nightly"]
+
+
+def test_a_dashboard_schedule_fires_like_any_other(tmp_path: Path) -> None:
+    cockpit, c, token = setup(tmp_path)
+    c.post("/schedules/new", data={"csrf_token": token, **form(cron="0 14 * * *")})  # 12:00Z in Budapest (UTC+2)
+    cockpit.db.set_setting("scheduler.last_tick_at", "2026-10-20T10:00:00Z")
+    jobs = cockpit.scheduler.tick()
+    assert jobs == []  # 10:00Z -> 10:00Z, nothing due yet
+    later = NOW + timedelta(hours=2, seconds=30)
+    cockpit.scheduler._clock = lambda: later  # noqa: SLF001
+    (job,) = cockpit.scheduler.tick()
+    assert job.trigger == "schedule:nightly" and job.repeat == 3 and job.stop_on_error
+
+
+def test_create_refuses_bad_input_and_keeps_the_form(tmp_path: Path) -> None:
+    cockpit, c, token = setup(tmp_path)
+    cases = {
+        "cron is not a valid cron expression": form(cron="nope"),
+        "name must match": form(name="Bad Name"),
+        "run must be a non-empty list": form(run="  \n "),
+        "repeat must be a number between 1 and 100": form(repeat="abc"),
+        "already exists": form(name="daily"),
+        "No recipe or group matches": form(run="typo"),
+    }
+    for message, data in cases.items():
+        response = c.post("/schedules/new", data={"csrf_token": token, **data})
+        assert response.status_code == 400, message
+        assert message in response.text, message
+    assert "nope" in c.post("/schedules/new", data={"csrf_token": token, **form(cron="nope")}).text
+    assert cockpit.schedule_store.all() == ()
+
+
+def test_edit_and_delete_a_dashboard_schedule(tmp_path: Path) -> None:
+    cockpit, c, token = setup(tmp_path)
+    c.post("/schedules/new", data={"csrf_token": token, **form()})
+    assert "readonly" in c.get("/schedules/nightly/edit").text
+    # the name field cannot be used to rename or to overwrite another schedule
+    response = c.post(
+        "/schedules/nightly/edit",
+        data={"csrf_token": token, **form(name="daily", cron="5 5 * * *", repeat="1", stop_on_error="")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    stored = cockpit.schedule_store.get("nightly")
+    assert stored is not None and stored.cron == "5 5 * * *" and stored.repeat == 1 and not stored.stop_on_error
+    assert cockpit.schedule_store.get("daily") is None
+    bad = c.post("/schedules/nightly/edit", data={"csrf_token": token, **form(cron="x")})
+    assert bad.status_code == 400 and "readonly" in bad.text
+    cockpit.scheduler.set_paused("nightly", True)
+    assert c.post("/schedules/nightly/delete", data={"csrf_token": token}, follow_redirects=False).status_code == 303
+    assert cockpit.schedule_store.all() == ()
+    assert not cockpit.scheduler.is_paused("nightly")
+
+
+def test_schedules_of_cockpit_yaml_and_unknown_ones_cannot_be_edited_or_deleted(tmp_path: Path) -> None:
+    _, c, token = setup(tmp_path)
+    for name in ("daily", "nope"):
+        assert c.get(f"/schedules/{name}/edit").status_code == 404
+        assert c.post(f"/schedules/{name}/edit", data={"csrf_token": token, **form()}).status_code == 404
+        assert c.post(f"/schedules/{name}/delete", data={"csrf_token": token}).status_code == 404
+
+
+def test_the_schedule_forms_need_the_csrf_token(tmp_path: Path) -> None:
+    cockpit, c, token = setup(tmp_path)
+    c.post("/schedules/new", data={"csrf_token": token, **form()})
+    for path in ("/schedules/new", "/schedules/nightly/edit", "/schedules/nightly/delete"):
+        assert c.post(path, data=form()).status_code == 403, path
+    assert cockpit.schedule_store.get("nightly") is not None
+
+
+def test_a_dashboard_schedule_with_the_name_of_a_yaml_schedule_is_ignored_and_reported(tmp_path: Path) -> None:
+    cockpit, c, token = setup(tmp_path, None)
+    c.post("/schedules/new", data={"csrf_token": token, **form(name="smoke")})
+    (tmp_path / "data" / "repo" / "cockpit.yaml").write_text(
+        'version: 1\nschedules:\n  - name: smoke\n    cron: "1 1 * * *"\n    run: [imports]\n'
+    )
+    (only,) = cockpit.config().schedules
+    assert only.source == "repo" and only.cron == "1 1 * * *"
+    page = c.get("/schedules").text
+    assert "smoke are not used" in page

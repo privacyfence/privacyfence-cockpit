@@ -11,6 +11,23 @@ from this file.
 
 ## [Unreleased]
 
+### Added
+
+- Manual runs (the dashboard's **Run selected** and `--branch NAME` on the CLI) can use another branch of the
+  recipe repository, in a separate worktree with its own recipe environment; schedules keep using the configured
+  branch ([ADR 0009](docs/adr/0009-manual-runs-can-use-another-branch-in-its-own-worktree-schedules-always-use-the-configured-checkout.md)).
+  The database schema is now version 3 (a `branch` column on runs); an existing database is upgraded on start.
+- The Overview page has a checkbox on each group that selects all of its recipes, so a whole group can be run with "Run selected".
+
+## [0.1.0] - 2026-10-21
+
+### Added
+
+- Schedules can be created, edited and deleted on the Schedules page. They are stored in the cockpit's
+  database next to the schedules of `cockpit.yaml`, which stay read-only there
+  ([ADR 0008](docs/adr/0008-schedules-can-also-be-made-in-the-dashboard-and-are-stored-in-the-cockpit-database.md)).
+  The database schema is now version 2; an existing database is upgraded on start.
+
 ## [0.0.4] - 2026-10-21
 
 ### Fixed

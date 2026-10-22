@@ -24,7 +24,7 @@ from privacyfence_cockpit.secrets_store import SecretStore
 from privacyfence_cockpit.tokens import TokenResolver
 from privacyfence_cockpit.venvs import VenvError, VenvManager, VenvResult
 from tests.fakesync import install_fake_venv
-from tests.gitutil import make_remote, push_commit
+from tests.gitutil import make_remote, push_branch, push_commit
 
 NOW = datetime(2026, 10, 20, 6, 15, 7, tzinfo=UTC)
 RECIPE = "name: fixture\n"
@@ -43,6 +43,9 @@ class CountingVenvs(VenvManager):
 
     def ensure(self) -> VenvResult:
         self.ensured += 1
+        return VenvResult(self.current(), False, None)
+
+    def ensure_for(self, repo):
         return VenvResult(self.current(), False, None)
 
 
@@ -566,3 +569,77 @@ async def test_run_forever_marks_the_queue_idle_after_each_job(env):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# -- branch jobs ---------------------------------------------------------------------------------
+
+
+def test_job_rejects_a_branch_for_scheduled_or_git_jobs():
+    with pytest.raises(ValueError, match="only manual run jobs can choose a branch"):
+        Job(JobKind.RUN, "schedule:nightly", branch="feature/x")
+    with pytest.raises(ValueError, match="only manual run jobs can choose a branch"):
+        Job(JobKind.GIT_UPDATE, "manual", branch="feature/x")
+    assert Job(JobKind.RUN, "manual", branch="feature/x").branch == "feature/x"
+
+
+async def test_branch_job_runs_the_branch_recipes(env):
+    sha = push_branch(env.remote, {"workflows/30-new/10-only/recipe.yaml": RECIPE}, "feature/x")
+    head, current = env.git.head(), env.db.get_setting("venv.current")
+    summary = await env.worker().execute(run_job(selectors=("new/10-only",), branch="feature/x"))
+    assert summary.error is None and len(summary.run_ids) == 1
+    [row] = env.rows()
+    assert (row.recipe_path, row.outcome, row.branch, row.commit_sha) == (
+        "new/10-only",
+        Outcome.OK,
+        "feature/x",
+        sha,
+    )
+    assert env.venvs.ensured == 0
+    assert env.git.head() == head
+    assert env.db.get_setting("venv.current") == current
+    assert (env.paths.branches / "feature%2Fx" / "workflows/30-new/10-only/recipe.yaml").exists()
+
+
+async def test_branch_job_with_an_unknown_branch_records_a_failed_row(env):
+    summary = await env.worker().execute(run_job(selectors=("imports",), branch="nope"))
+    [row] = env.rows()
+    assert summary.run_ids == (row.id,)
+    assert row.outcome is Outcome.FAILED
+    assert row.note == "There is no branch nope on the remote."
+    assert row.branch == "nope"
+
+
+async def test_branch_job_with_an_unknown_selector_records_a_recipe_error_with_the_branch(env):
+    push_branch(env.remote, {"README.md": "branch\n"}, "feature/x")
+    await env.worker().execute(run_job(selectors=("missing",), branch="feature/x"))
+    [row] = env.rows()
+    assert row.outcome is Outcome.RECIPE_ERROR
+    assert row.branch == "feature/x"
+
+
+async def test_branch_job_with_clashing_groups_records_a_recipe_error(env):
+    push_branch(
+        env.remote,
+        {
+            "workflows/10-imports/10-one/recipe.yaml": RECIPE,
+            "workflows/20-imports/10-one/recipe.yaml": RECIPE,
+        },
+        "feature/x",
+    )
+    await env.worker().execute(run_job(selectors=("imports",), branch="feature/x"))
+    [row] = env.rows()
+    assert row.outcome is Outcome.RECIPE_ERROR
+    assert row.branch == "feature/x"
+    assert row.note
+
+
+async def test_reclone_removes_branch_worktrees_and_environments(env):
+    push_branch(env.remote, {"README.md": "branch\n"}, "feature/x")
+    env.git.fetch()
+    env.git.branch_worktree("feature/x")
+    env.paths.branch_venvs.mkdir()
+    (env.paths.branch_venvs / "leftover").mkdir()
+    summary = await env.worker().execute(Job(JobKind.GIT_CLONE, "manual"))
+    assert summary.error is None
+    assert not env.paths.branches.exists()
+    assert not env.paths.branch_venvs.exists()

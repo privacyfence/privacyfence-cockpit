@@ -16,7 +16,10 @@
   </thead>
   {% for group, rows in groups %}
   <tbody>
-    <tr><th colspan="5">{{ group }}</th></tr>
+    <tr>
+      <th><input type="checkbox" data-group-toggle aria-label="Select all in {{ group }}"></th>
+      <th colspan="4">{{ group }}</th>
+    </tr>
     {% for row in rows %}
     <tr>
       <td><input type="checkbox" name="recipe" value="{{ row.recipe.path }}" form="run-selected" aria-label="Select {{ row.recipe.path }}"></td>
@@ -44,6 +47,17 @@
       {% for mode in modes %}<option value="{{ mode }}">{{ mode }}</option>{% endfor %}
     </select>
   </label>
+  {% if branches %}
+  <label>Branch
+    <select name="branch">
+      <option value="">{{ configured_branch }} (configured)</option>
+      {% for branch in branches %}<option value="{{ branch }}">{{ branch }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Also run (on the chosen branch; one recipe or group per line)
+    <textarea name="more" rows="2"></textarea>
+  </label>
+  {% endif %}
   <button type="submit" class="primary">Run selected</button>
 </form>
 {% endif %}

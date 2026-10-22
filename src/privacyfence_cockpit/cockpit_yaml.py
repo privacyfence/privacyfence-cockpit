@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -26,6 +26,7 @@ class Schedule:
     run: tuple[str, ...]
     repeat: int = 1
     stop_on_error: bool = False
+    source: str = "repo"  # "repo" (cockpit.yaml) or "ui" (the dashboard's database)
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,10 @@ class CockpitConfig:
 
 class CockpitConfigError(ValueError):
     """Message always starts with ``cockpit.yaml: ``."""
+
+
+class ScheduleInputError(ValueError):
+    """A schedule entered in the dashboard is invalid; the message is shown to the owner."""
 
 
 def _fail(message: str) -> CockpitConfigError:
@@ -78,6 +83,16 @@ def _parse_schedule(raw: Any, index: int, seen: set[str]) -> Schedule:
     if not isinstance(stop_on_error, bool):
         raise _fail(f"schedule {name}: stop_on_error must be true or false")
     return Schedule(name, cron, tuple(run), repeat, stop_on_error)
+
+
+def parse_ui_schedule(raw: dict[str, Any]) -> Schedule:
+    """Validate a schedule entered in the dashboard with the rules of cockpit.yaml; the message has no file prefix."""
+    try:
+        parsed = _parse_schedule(raw, 0, set())
+    except CockpitConfigError as exc:
+        message = str(exc).removeprefix("cockpit.yaml: ")
+        raise ScheduleInputError(message.removeprefix("schedules[0]: ")) from exc
+    return replace(parsed, source="ui")
 
 
 def load_cockpit_yaml(repo: Path) -> CockpitConfig:

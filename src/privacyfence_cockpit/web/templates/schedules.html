@@ -3,10 +3,11 @@
 {% block title %}Schedules · PrivacyFence Cockpit{% endblock %}
 {% block content %}
 <h1>Schedules</h1>
+<p><a href="/schedules/new">New schedule</a></p>
 {% if error %}
 <p class="banner banner-error" role="alert">{{ error }}</p>
 {% elif not views %}
-<p class="muted">No schedules. Add them under <code>schedules:</code> in cockpit.yaml in the recipe repository.</p>
+<p class="muted">No schedules. Create one here, or add it under <code>schedules:</code> in cockpit.yaml in the recipe repository.</p>
 {% else %}
 <table class="data">
   <thead>
@@ -16,7 +17,7 @@
   {% for view in views %}
     {% set s = view.schedule %}
     <tr>
-      <td>{{ s.name }}</td>
+      <td>{{ s.name }}<br><span class="muted">{{ "dashboard" if s.source == "ui" else "cockpit.yaml" }}</span></td>
       <td><span class="mono">{{ s.cron }}</span><br><span class="muted">{{ tz }}</span></td>
       <td>
         {% for selector in s.run %}<span class="mono">{{ selector }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
@@ -44,11 +45,18 @@
         {{ post_button("/schedules/" ~ s.name ~ "/pause", "Pause", csrf_token) }}
         {% endif %}
         {{ post_button("/schedules/" ~ s.name ~ "/run", "Run now", csrf_token) }}
+        {% if s.source == "ui" %}
+        <a href="/schedules/{{ s.name }}/edit">Edit</a>
+        {{ post_button("/schedules/" ~ s.name ~ "/delete", "Delete", csrf_token) }}
+        {% endif %}
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% endif %}
+{% if shadowed %}
+<p class="muted">Dashboard schedule(s) {{ shadowed|join(", ") }} are not used: cockpit.yaml has a schedule with the same name.</p>
 {% endif %}
 
 <h2>Missed runs</h2>

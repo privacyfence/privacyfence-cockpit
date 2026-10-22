@@ -13,6 +13,7 @@
     <tr><th>Started</th><td>{{ run.started_at|localtime(tz) }}</td></tr>
     <tr><th>Duration</th><td>{% if run.duration_seconds is not none %}{{ "%.1f"|format(run.duration_seconds) }} s{% else %}—{% endif %}</td></tr>
     <tr><th>Commit</th><td class="mono">{{ run.commit_sha|sha7 or "—" }}</td></tr>
+    {% if run.branch %}<tr><th>Branch</th><td class="mono">{{ run.branch }}</td></tr>{% endif %}
     <tr><th>Token source</th><td>{{ run.token_source or "—" }}</td></tr>
     {% if run.note %}<tr><th>Note</th><td>{{ run.note }}</td></tr>{% endif %}
   </tbody>

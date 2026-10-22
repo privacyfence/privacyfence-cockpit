@@ -22,7 +22,7 @@ def history(db):
     return History(db)
 
 
-def start(history, *, recipe="imports/a", at=T0, trigger="manual", mode=Mode.UNATTENDED, job_id=None):
+def start(history, *, recipe="imports/a", at=T0, trigger="manual", mode=Mode.UNATTENDED, job_id=None, branch=None):
     return history.start(
         job_id=job_id,
         trigger=trigger,
@@ -32,6 +32,7 @@ def start(history, *, recipe="imports/a", at=T0, trigger="manual", mode=Mode.UNA
         log_path=None,
         commit_sha="abc",
         token_source="default",
+        branch=branch,
     )
 
 
@@ -113,6 +114,19 @@ def test_last_by_recipe_ignores_running_and_missed(history):
     assert last["g/a"].id == new
 
 
+def test_start_records_the_branch(history):
+    assert history.get(start(history)).branch is None
+    assert history.get(start(history, branch="feature/x")).branch == "feature/x"
+
+
+def test_last_by_recipe_ignores_branch_runs(history):
+    configured = start(history, recipe="g/a", at=T0)
+    history.finish(configured, outcome=Outcome.OK, exit_code=0, finished_at=T0)
+    experiment = start(history, recipe="g/a", at=T0 + timedelta(hours=1), branch="feature/x")
+    history.finish(experiment, outcome=Outcome.FAILED, exit_code=1, finished_at=T0)
+    assert history.last_by_recipe()["g/a"].id == configured
+
+
 def test_record_missed(history):
     run_id = history.record_missed("nightly", T0, "the cockpit was not running")
     row = history.get(run_id)
@@ -165,11 +179,11 @@ def test_export_csv(history):
     lines = out.getvalue().splitlines()
     assert lines[0] == (
         "id,started_at,finished_at,trigger,recipe,mode,outcome,exit_code,duration_seconds,commit,"
-        "token_source,log_path,note"
+        "token_source,log_path,note,branch"
     )
     assert lines[1].startswith(f"{b},2026-10-20T06:00:00Z,,manual,imports/b,unattended,")
     assert lines[2] == (
-        f'{a},2026-10-20T07:00:00Z,2026-10-20T07:00:05Z,manual,imports/a,unattended,ok,0,5.0,abc,default,,"n, 1"'
+        f'{a},2026-10-20T07:00:00Z,2026-10-20T07:00:05Z,manual,imports/a,unattended,ok,0,5.0,abc,default,,"n, 1",'
     )
     only = io.StringIO()
     assert history.export_csv(HistoryFilter(recipe="imports/b"), only) == 1

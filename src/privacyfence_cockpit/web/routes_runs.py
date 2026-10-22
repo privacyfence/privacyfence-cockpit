@@ -45,7 +45,10 @@ def _cockpit(request: Request) -> Cockpit:
 def _describe(job: Job) -> str:
     if job.kind is not JobKind.RUN:
         return job.kind.value.replace("_", " ")
-    return f"{', '.join(job.selectors) or 'all recipes'} ({job.mode.value}, {job.trigger})"
+    what = ", ".join(job.selectors) or "all recipes"
+    if job.branch is not None:
+        return f"{what} ({job.mode.value}, {job.trigger}, branch {job.branch})"
+    return f"{what} ({job.mode.value}, {job.trigger})"
 
 
 def _recipe_server(recipe: Recipe) -> str | None:
@@ -86,8 +89,11 @@ async def overview(request: Request) -> Response:
             )
         groups.append((name, rows))
     running = cockpit.queue.running()
+    configured_branch = cockpit.git.configured_branch()
     context = {
         "groups": groups,
+        "configured_branch": configured_branch,
+        "branches": [b for b in cockpit.git.remote_branches() if b != configured_branch],
         "tz": eff.timezone,
         "running": running,
         "running_text": _describe(running) if running else None,
@@ -100,14 +106,23 @@ async def overview(request: Request) -> Response:
 async def post_run(request: Request) -> Response:
     form = await require_csrf(request)
     cockpit = _cockpit(request)
-    selected = tuple(v for v in form.getlist("recipe") if isinstance(v, str) and v)
+    ticked = tuple(v for v in form.getlist("recipe") if isinstance(v, str) and v)
+    branch: str | None = str(form.get("branch") or "").strip()
+    if not branch or branch == cockpit.git.configured_branch():
+        branch = None
+    more = tuple(line.strip() for line in str(form.get("more") or "").splitlines() if line.strip())
+    if more and branch is None:
+        return redirect("/", flash="Also run needs a branch; tick the recipes instead.")
+    selected = ticked + more
     if not selected:
         return redirect("/", flash="Pick at least one recipe.")
     try:
         mode = Mode(str(form.get("mode") or Mode.UNATTENDED.value))
     except ValueError:
         return redirect("/", flash="Pick a valid mode.")
-    job = Job(JobKind.RUN, "manual", selectors=selected, mode=mode)
+    if branch is not None and branch not in cockpit.git.remote_branches():
+        return redirect("/", flash="Pick a branch from the list.")
+    job = Job(JobKind.RUN, "manual", selectors=selected, mode=mode, branch=branch)
     cockpit.queue.submit(job)
     return redirect(f"/jobs/{job.id}")
 

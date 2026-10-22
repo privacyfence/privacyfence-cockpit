@@ -94,3 +94,5 @@ Issues, PRs, commits, other ADRs.
 | [0005](0005-missed-scheduled-runs-are-recorded-and-notified-never-caught-up.md) | Missed scheduled runs are recorded and notified, never caught up | Accepted |
 | [0006](0006-the-recipe-checkout-changes-only-on-the-owners-request-fast-forward-only-and-is-never-committed-to.md) | The recipe checkout changes only on the owner's request, fast-forward only, and is never committed to | Accepted |
 | [0007](0007-one-multi-arch-image-on-ghcr-published-with-provenance-by-the-run-that-cuts-the-tag.md) | One multi-arch image on GHCR, published with provenance by the run that cuts the tag | Accepted |
+| [0008](0008-schedules-can-also-be-made-in-the-dashboard-and-are-stored-in-the-cockpit-database.md) | Schedules can also be made in the dashboard and are stored in the cockpit database | Accepted |
+| [0009](0009-manual-runs-can-use-another-branch-in-its-own-worktree-schedules-always-use-the-configured-checkout.md) | Manual runs can use another branch of the recipe repository, in its own worktree and environment; schedules always use the configured checkout | Accepted |

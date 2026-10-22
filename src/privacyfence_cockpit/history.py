@@ -28,6 +28,7 @@ CSV_COLUMNS = (
     "token_source",
     "log_path",
     "note",
+    "branch",
 )
 
 
@@ -50,6 +51,7 @@ class RunRow:
     pid: int | None
     stop_requested: bool
     note: str | None
+    branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ def _row(r: sqlite3.Row) -> RunRow:
         pid=r["pid"],
         stop_requested=bool(r["stop_requested"]),
         note=r["note"],
+        branch=r["branch"],
     )
 
 
@@ -127,11 +130,12 @@ class History:
         log_path: str | None,
         commit_sha: str | None,
         token_source: str | None,
+        branch: str | None = None,
     ) -> int:
         cursor = self._db.execute(
             "INSERT INTO runs (job_id, trigger, recipe_path, mode, status, started_at, log_path, commit_sha,"
-            " token_source) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)",
-            (job_id, trigger, recipe_path, mode.value, iso(started_at), log_path, commit_sha, token_source),
+            " token_source, branch) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)",
+            (job_id, trigger, recipe_path, mode.value, iso(started_at), log_path, commit_sha, token_source, branch),
         )
         assert cursor.lastrowid is not None  # noqa: S101  # nosec B101  # an INSERT always sets it
         return cursor.lastrowid
@@ -186,6 +190,7 @@ class History:
     def last_by_recipe(self) -> dict[str, RunRow]:
         rows = self._db.query(
             "SELECT * FROM runs WHERE status = 'finished' AND recipe_path IS NOT NULL AND outcome != ?"
+            " AND branch IS NULL"
             " ORDER BY started_at DESC, id DESC",
             (Outcome.MISSED.value,),
         )
@@ -232,6 +237,7 @@ class History:
                     r.token_source,
                     r.log_path,
                     r.note,
+                    r.branch,
                 ]
             )
         return len(rows)

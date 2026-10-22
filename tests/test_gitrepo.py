@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -9,7 +10,7 @@ from privacyfence_cockpit.events import EventKind, ListSink
 from privacyfence_cockpit.gitrepo import GitError, GitManager, _first_line, no_credentials
 from privacyfence_cockpit.models import utc_now
 from privacyfence_cockpit.paths import DataPaths
-from tests.gitutil import git, make_remote, push_commit, rewrite_history
+from tests.gitutil import git, make_remote, push_branch, push_commit, rewrite_history
 
 
 class Clock:
@@ -396,3 +397,131 @@ def test_fetch_before_the_clone_is_refused_without_recording_a_failure(env):
     assert db.get_setting("git.last_fetch_attempt_at") is None
     assert sink.events == []
 
+
+def test_fetch_downloads_every_branch(cloned):
+    manager, _, _, remote, _, _ = cloned
+    push_branch(remote, {"x.txt": "x\n"}, "feature/x")
+    manager.fetch()
+    assert manager.remote_branches() == ["feature/x", "main"]
+
+
+def test_remote_branches_is_empty_before_the_clone(env):
+    assert env[0].remote_branches() == []
+
+
+def test_remote_branches_is_empty_when_git_fails(cloned, monkeypatch):
+    manager = cloned[0]
+
+    def boom(argv, extra_env):
+        raise GitError("nope")
+
+    monkeypatch.setattr(manager, "_run", boom)
+    assert manager.remote_branches() == []
+    monkeypatch.setattr(
+        manager, "_run", lambda argv, extra_env: subprocess.CompletedProcess(argv, 1, "", "bad")
+    )
+    assert manager.remote_branches() == []
+
+
+def test_remote_branches_drops_unsafe_names(cloned, monkeypatch):
+    manager = cloned[0]
+    monkeypatch.setattr(
+        manager,
+        "_run",
+        lambda argv, extra_env: subprocess.CompletedProcess(argv, 0, "HEAD\nmain\n-x\na/.hidden\nok/name\n", ""),
+    )
+    assert manager.remote_branches() == ["main", "ok/name"]
+
+
+def test_configured_branch(env):
+    assert env[0].configured_branch() == "main"
+
+
+def _with_branch(cloned, files=None):
+    manager, paths, _, remote, _, _ = cloned
+    sha = push_branch(remote, files or {"x.txt": "x\n"}, "feature/x")
+    manager.fetch()
+    return manager, paths, remote, sha
+
+
+def test_branch_worktree_checks_out_the_branch_tip(cloned):
+    manager, paths, _, sha = _with_branch(cloned)
+    head = manager.head()
+    path, got = manager.branch_worktree("feature/x")
+    assert path == paths.branches / "feature%2Fx"
+    assert got == sha
+    assert git(path, "rev-parse", "HEAD") == sha
+    assert (path / "x.txt").read_text() == "x\n"
+    assert manager.head() == head
+
+
+def test_branch_worktree_moves_to_a_newer_commit_and_keeps_ignored_files(cloned):
+    manager, _, remote, _ = _with_branch(cloned, {".gitignore": "work/\n", "x.txt": "x\n"})
+    path, _ = manager.branch_worktree("feature/x")
+    (path / "work").mkdir()
+    (path / "work" / "state").write_text("kept")
+    newer = push_commit(remote, {"y.txt": "y\n"}, "more", branch="feature/x")
+    manager.fetch()
+    path, sha = manager.branch_worktree("feature/x")
+    assert sha == newer
+    assert git(path, "rev-parse", "HEAD") == newer
+    assert (path / "work" / "state").read_text() == "kept"
+
+
+def test_branch_worktree_replaces_a_leftover_folder(cloned):
+    manager, paths, _, sha = _with_branch(cloned)
+    stray = paths.branches / "feature%2Fx"
+    stray.mkdir(parents=True)
+    (stray / "stray").write_text("junk")
+    path, got = manager.branch_worktree("feature/x")
+    assert got == sha
+    assert not (path / "stray").exists()
+
+
+def test_branch_worktree_refuses_the_configured_branch(cloned):
+    with pytest.raises(GitError, match="main is the configured branch; run it without choosing a branch."):
+        cloned[0].branch_worktree("main")
+
+
+def test_branch_worktree_refuses_an_unknown_branch(cloned):
+    with pytest.raises(GitError, match="There is no branch nope on the remote."):
+        cloned[0].branch_worktree("nope")
+
+
+def test_branch_worktree_refuses_tracked_changes(cloned):
+    manager, _, _, _ = _with_branch(cloned)
+    path, _ = manager.branch_worktree("feature/x")
+    (path / "x.txt").write_text("changed\n")
+    with pytest.raises(GitError, match="/data/branches/feature%2Fx"):
+        manager.branch_worktree("feature/x")
+
+
+def test_branch_worktree_refuses_a_name_that_escapes_the_folder(cloned, monkeypatch):
+    manager = cloned[0]
+    monkeypatch.setattr(manager, "remote_branches", lambda: ["a/b"])
+    monkeypatch.setattr(manager, "_checked", lambda *a: subprocess.CompletedProcess(a, 0, "0" * 40, ""))
+    monkeypatch.setattr("privacyfence_cockpit.gitrepo.branch_folder", lambda b: "../evil")
+    with pytest.raises(GitError, match="There is no branch"):
+        manager.branch_worktree("a/b")
+
+
+def test_worktrees_of_deleted_branches_are_removed(cloned):
+    manager, paths, remote, _ = _with_branch(cloned)
+    path, _ = manager.branch_worktree("feature/x")
+    git(remote, "branch", "-D", "feature/x")
+    push_branch(remote, {"z.txt": "z\n"}, "feature/z")
+    manager.fetch()
+    manager.branch_worktree("feature/z")
+    assert not path.exists()
+    assert (paths.branches / "feature%2Fz").exists()
+
+
+def test_branch_worktree_reports_a_refused_checkout(cloned):
+    manager, _, remote, _ = _with_branch(cloned)
+    path, _ = manager.branch_worktree("feature/x")
+    newer = push_commit(remote, {"y.txt": "y\n"}, "more", branch="feature/x")
+    manager.fetch()
+    (path / "y.txt").write_text("untracked\n")
+    with pytest.raises(GitError, match="git checkout failed"):
+        manager.branch_worktree("feature/x")
+    assert newer

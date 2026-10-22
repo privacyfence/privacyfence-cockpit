@@ -12,12 +12,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
+from privacyfence_cockpit.branches import BranchCheckout, prepare_branch
 from privacyfence_cockpit.effective import Effective
 from privacyfence_cockpit.events import Event, EventKind, EventSink
 from privacyfence_cockpit.gitrepo import GitError, GitManager
 from privacyfence_cockpit.history import History
 from privacyfence_cockpit.models import NOTIFY_OUTCOMES, SUCCESS_OUTCOMES, Mode, Outcome, utc_now
-from privacyfence_cockpit.recipes import Recipe, SelectionError, select
+from privacyfence_cockpit.recipes import DiscoveryError, Recipe, SelectionError, discover, select
 from privacyfence_cockpit.runlock import RunLock
 from privacyfence_cockpit.runner import Runner
 from privacyfence_cockpit.venvs import VenvError, VenvManager
@@ -46,8 +47,13 @@ class Job:
     stop_on_error: bool = False
     sha: str | None = None
     attended: bool = False  # passed to Runner.run; only preflight uses it
+    branch: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     submitted_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        if self.branch is not None and (self.kind is not JobKind.RUN or self.trigger.startswith(SCHEDULE_PREFIX)):
+            raise ValueError("only manual run jobs can choose a branch")
 
 
 @dataclass(frozen=True)
@@ -179,17 +185,30 @@ class Worker:
         # The git lock keeps a fetch from running inside the checkout while it is deleted.
         with paths.git_lock.open("a+") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
+            shutil.rmtree(paths.branches, ignore_errors=True)
+            shutil.rmtree(paths.branch_venvs, ignore_errors=True)
             shutil.rmtree(paths.repo, ignore_errors=True)
         self._venvs.db.delete_setting("git.pinned_sha")
         self._git.clone()
 
     async def _run_job(self, job: Job) -> JobSummary:
         scheduled = job.trigger.startswith(SCHEDULE_PREFIX)
-        if scheduled and self._effective().auto_update:
-            await self._auto_update()
-        await asyncio.to_thread(self._venvs.ensure)
+        checkout: BranchCheckout | None = None
+        found: list[Recipe] | None = None
+        if job.branch is None:
+            if scheduled and self._effective().auto_update:
+                await self._auto_update()
+            await asyncio.to_thread(self._venvs.ensure)
+        else:
+            try:
+                checkout = await asyncio.to_thread(prepare_branch, self._git, self._venvs, job.branch)
+                found = discover(checkout.root)
+            except GitError as exc:
+                return JobSummary(job.id, (self._record_selection_error(job, str(exc), Outcome.FAILED),), None)
+            except DiscoveryError as exc:
+                return JobSummary(job.id, (self._record_selection_error(job, str(exc)),), None)
         try:
-            chosen = select(self._recipes(), job.selectors)
+            chosen = select(self._recipes() if found is None else found, job.selectors)
         except SelectionError as exc:
             return JobSummary(job.id, (self._record_selection_error(job, str(exc)),), None)
         run_ids: list[int] = []
@@ -204,6 +223,7 @@ class Worker:
                     job_id=job.id,
                     on_line=self._on_line,
                     attended=job.attended,
+                    checkout=checkout,
                 )
                 run_ids.append(result.run_id)
                 outcome = result.outcome
@@ -234,7 +254,7 @@ class Worker:
         except GitError as exc:
             log.warning("update before the scheduled run failed: %s", exc)
 
-    def _record_selection_error(self, job: Job, message: str) -> int:
+    def _record_selection_error(self, job: Job, message: str, outcome: Outcome = Outcome.RECIPE_ERROR) -> int:
         now = utc_now()
         run_id = self._history.start(
             job_id=job.id,
@@ -245,8 +265,9 @@ class Worker:
             log_path=None,
             commit_sha=None,
             token_source=None,
+            branch=job.branch,
         )
-        self._history.finish(run_id, outcome=Outcome.RECIPE_ERROR, exit_code=None, finished_at=now, note=message)
+        self._history.finish(run_id, outcome=outcome, exit_code=None, finished_at=now, note=message)
         if job.trigger.startswith(SCHEDULE_PREFIX):
             self._events.emit(
                 Event(
