@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from privacyfence_cockpit.db import _SCHEMA_V1, Database, DatabaseError
+from privacyfence_cockpit.db import _SCHEMA_V1, _SCHEMA_V2, Database, DatabaseError
 
 TABLES = {
     "settings",
@@ -26,8 +26,8 @@ def db(tmp_path):
     database.close()
 
 
-def test_migrate_creates_schema_version_2(db):
-    assert db.query_one("PRAGMA user_version")[0] == 2
+def test_migrate_creates_schema_version_3(db):
+    assert db.query_one("PRAGMA user_version")[0] == 3
     names = {r["name"]: r["type"] for r in db.query("SELECT name, type FROM sqlite_master")}
     assert TABLES <= {n for n, t in names.items() if t == "table"}
     assert INDEXES <= {n for n, t in names.items() if t == "index"}
@@ -37,7 +37,7 @@ def test_migrate_twice_is_a_noop(db):
     db.set_setting("a", "1")
     db.migrate()
     assert db.get_setting("a") == "1"
-    assert db.query_one("PRAGMA user_version")[0] == 2
+    assert db.query_one("PRAGMA user_version")[0] == 3
 
 
 def test_a_version_1_database_is_upgraded_keeping_its_data(tmp_path):
@@ -48,9 +48,31 @@ def test_a_version_1_database_is_upgraded_keeping_its_data(tmp_path):
     conn.close()
     database = Database(path)
     database.migrate()
-    assert database.query_one("PRAGMA user_version")[0] == 2
+    assert database.query_one("PRAGMA user_version")[0] == 3
     assert database.get_setting("a") == "1"
     assert database.query("SELECT * FROM ui_schedules") == []
+    database.close()
+
+
+def test_a_version_2_database_gets_the_branch_column(tmp_path):
+    path = tmp_path / "cockpit.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA_V1)
+    conn.executescript(_SCHEMA_V2)
+    conn.executescript(
+        "INSERT INTO runs (trigger, mode, status, started_at) VALUES ('manual', 'unattended', 'running', 't');"
+        " PRAGMA user_version = 2;"
+    )
+    conn.close()
+    database = Database(path)
+    database.migrate()
+    assert database.query_one("PRAGMA user_version")[0] == 3
+    assert database.query_one("SELECT branch FROM runs")["branch"] is None
+    database.execute(
+        "INSERT INTO runs (trigger, mode, status, started_at, branch)"
+        " VALUES ('manual', 'unattended', 'running', 't', 'x')"
+    )
+    assert database.query_one("SELECT branch FROM runs WHERE branch IS NOT NULL")["branch"] == "x"
     database.close()
 
 

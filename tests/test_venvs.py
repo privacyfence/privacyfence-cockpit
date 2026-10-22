@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from privacyfence_cockpit.models import utc_now
 from privacyfence_cockpit.paths import DataPaths
 from privacyfence_cockpit.venvs import (
     GATE_MESSAGE,
+    PIN_MESSAGE,
     VenvError,
     VenvManager,
     VenvResult,
@@ -346,3 +348,101 @@ def test_python_version_comes_from_the_other_interpreter(env):
     run.override = lambda argv, kw: subprocess.CompletedProcess(argv, 1, "", "") if argv[1:2] == ["-c"] else None
     other.ensure()
     assert venv_hash(paths.repo, "unknown") in {d.name for d in paths.venvs.iterdir()}
+
+
+def branch_repo(tmp_path, name, requirements=PIN):
+    repo = tmp_path / "branches" / name
+    repo.mkdir(parents=True)
+    (repo / "requirements.txt").write_text(requirements)
+    return repo
+
+
+def test_ensure_for_reuses_the_configured_environment_when_requirements_match(env, tmp_path):
+    manager, paths, _db, _sink, _run = env
+    configured = manager.ensure().path
+    repo = branch_repo(tmp_path, "feature%2Fx")
+    result = manager.ensure_for(repo)
+    assert result == VenvResult(configured, False, None)
+    assert result.path == paths.venvs / venv_hash(repo, ".".join(map(str, sys.version_info[:3])))
+    assert not paths.branch_venvs.exists()
+
+
+def test_ensure_for_with_local_packages_builds_its_own_environment(env, tmp_path):
+    manager, paths, _db, _sink, run = env
+    text = PIN + "-e ./lib/x\n"
+    set_requirements(paths, text)
+    (paths.repo / "lib/x").mkdir(parents=True)
+    (paths.repo / "lib/x/pyproject.toml").write_text("[project]\nname='x'\n")
+    manager.ensure()
+    repo = branch_repo(tmp_path, "feature%2Fx", text)
+    (repo / "lib/x").mkdir(parents=True)
+    (repo / "lib/x/pyproject.toml").write_text("[project]\nname='x'\n")
+    result = manager.ensure_for(repo)
+    digest = venv_hash(repo, ".".join(map(str, sys.version_info[:3])))
+    assert result == VenvResult(paths.branch_venvs / f"feature%2Fx-{digest}", True, None)
+    pip_calls = [kw for argv, kw in run.calls if argv[1:3] == ["-m", "pip"]]
+    assert pip_calls[-1]["cwd"] == repo
+
+
+def test_ensure_for_builds_in_branch_venvs_and_leaves_the_current_setting(env, tmp_path):
+    manager, paths, db, _sink, _run = env
+    manager.ensure()
+    set_requirements(paths, PIN + "requests==2\n")
+    manager.ensure()
+    current, previous = db.get_setting("venv.current"), db.get_setting("venv.previous")
+    repo = branch_repo(tmp_path, "feature%2Fx", PIN + "idna==3\n")
+    result = manager.ensure_for(repo)
+    assert result.built is True and result.error is None
+    assert result.path is not None and result.path.parent == paths.branch_venvs
+    assert db.get_setting("venv.current") == current
+    assert db.get_setting("venv.previous") == previous
+    assert (paths.venvs / current).is_dir()
+
+
+def test_ensure_for_reuses_a_ready_branch_environment(env, tmp_path):
+    manager, _paths, _db, _sink, run = env
+    repo = branch_repo(tmp_path, "feature%2Fx", PIN + "idna==3\n")
+    first = manager.ensure_for(repo)
+    builds = len(run.builds())
+    second = manager.ensure_for(repo)
+    assert second == VenvResult(first.path, False, None)
+    assert len(run.builds()) == builds
+
+
+def test_ensure_for_keeps_two_branch_environments(env, tmp_path):
+    _manager, paths, db, sink, run = env
+    now = [utc_now()]
+
+    def clock():
+        now[0] += timedelta(minutes=1)
+        return now[0]
+
+    manager = VenvManager(paths, db, sink, run=run, clock=clock)
+    built = []
+    for index in range(3):
+        repo = branch_repo(tmp_path, f"b{index}", PIN + f"idna=={index}\n")
+        built.append(manager.ensure_for(repo).path)
+    assert sorted(p.name for p in paths.branch_venvs.iterdir()) == sorted([built[1].name, built[2].name])
+    (paths.branch_venvs / "stray").mkdir()
+    (paths.branch_venvs / "stray" / "file").write_text("")
+    manager.ensure_for(branch_repo(tmp_path, "b3", PIN + "idna==9\n"))
+    assert not (paths.branch_venvs / "stray").exists()
+
+
+def test_ensure_for_failure_is_returned_not_notified(env, tmp_path):
+    manager, paths, db, sink, run = env
+    run.pip_code = 1
+    repo = branch_repo(tmp_path, "feature%2Fx", PIN + "idna==3\n")
+    result = manager.ensure_for(repo)
+    assert result.path is None and result.built is False
+    assert result.error is not None and "pip install failed" in result.error
+    assert sink.events == []
+    assert db.get_setting("venv.last_error") is None
+    assert list(paths.branch_venvs.iterdir()) == []
+    no_requirements = tmp_path / "branches" / "empty"
+    no_requirements.mkdir()
+    missing = manager.ensure_for(no_requirements)
+    assert missing == VenvResult(None, False, "the recipe repository has no requirements.txt")
+    unpinned = branch_repo(tmp_path, "unpinned", "requests==2\n")
+    assert manager.ensure_for(unpinned).error == PIN_MESSAGE
+    assert sink.events == []

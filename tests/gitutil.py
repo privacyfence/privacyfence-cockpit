@@ -47,6 +47,18 @@ def push_commit(remote: Path, files: dict[str, str | bytes], message: str, branc
     return git(scratch, "rev-parse", "HEAD")
 
 
+def push_branch(remote: Path, files: dict[str, str | bytes], branch: str, base: str = "main") -> str:
+    """Create `branch` from `base` with one commit and push it; return the new sha."""
+    scratch = remote.parent / f"push-{len(list(remote.parent.glob('push-*')))}"
+    git(remote.parent, "clone", "--branch", base, str(remote), str(scratch))
+    git(scratch, "checkout", "-b", branch)
+    _write(scratch, files)
+    git(scratch, "add", "-A")
+    git(scratch, "commit", "-m", "branch commit")
+    git(scratch, "push", "origin", branch)
+    return git(scratch, "rev-parse", "HEAD")
+
+
 def rewrite_history(remote: Path, files: dict[str, str | bytes], branch: str = "main") -> str:
     """Replace the branch with an unrelated root commit and force-push it."""
     scratch = remote.parent / "rewrite"

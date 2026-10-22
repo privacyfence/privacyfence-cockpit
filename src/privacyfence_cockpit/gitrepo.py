@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import re
+import shutil
 import subprocess  # nosec B404  # fixed argv, no shell; git is the whole point of this module
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -14,7 +15,7 @@ from pathlib import Path
 from privacyfence_cockpit.db import Database
 from privacyfence_cockpit.events import Event, EventKind, EventSink
 from privacyfence_cockpit.models import iso, parse_iso, utc_now
-from privacyfence_cockpit.paths import DataPaths
+from privacyfence_cockpit.paths import DataPaths, branch_folder
 
 TIMEOUT_SECONDS = 300
 DIFF_LIMIT = 512 * 1024
@@ -162,7 +163,8 @@ class GitManager:
         self._db.set_setting("git.last_fetch_attempt_at", iso(now))
         try:
             with self._lock(), self._credentials() as extra:
-                result = self._run(self._argv("fetch", "--prune", "origin"), extra)
+                argv = self._argv("fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
+                result = self._run(argv, extra)
         except GitError as exc:
             self._fetch_failed(now, str(exc))
             raise
@@ -244,6 +246,67 @@ class GitManager:
         if not self._cloned():
             return None
         return self._rev_parse("HEAD")
+
+    def configured_branch(self) -> str | None:
+        return self._db.get_setting("git.branch")
+
+    def remote_branches(self) -> list[str]:
+        """The branches fetched from the remote, without touching the network; never raises."""
+        if not self._cloned():
+            return []
+        try:
+            result = self._git("for-each-ref", "--format=%(refname:lstrip=3)", "refs/remotes/origin")
+        except GitError:
+            return []
+        if result.returncode != 0:
+            return []
+        names = (line.strip() for line in result.stdout.splitlines())
+        return sorted(name for name in names if name != "HEAD" and _safe_branch(name))
+
+    def branch_worktree(self, branch: str) -> tuple[Path, str]:
+        """Check out the fetched tip of a remote branch in its own worktree; return (path, sha)."""
+        configured = self._require_branch()
+        if branch == configured:
+            raise GitError(f"{branch} is the configured branch; run it without choosing a branch.")
+        remote = self.remote_branches()
+        missing = GitError(f"There is no branch {branch} on the remote.")
+        if branch not in remote:
+            raise missing
+        sha = self._checked("rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}").stdout.strip()
+        path = self._paths.branches / branch_folder(branch)
+        if path.parent != self._paths.branches:
+            raise missing
+        with self._lock():
+            self._prune_worktrees(remote)
+            if (path / ".git").exists():
+                if self._checked_in(path, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+                    raise GitError(
+                        f"The checkout of {branch} has changes to tracked files and the cockpit never "
+                        "overwrites them. Inspect them with: "
+                        f"docker exec <container> git -C /data/branches/{branch_folder(branch)} status"
+                    )
+                self._checked_in(path, "checkout", "--quiet", "--detach", sha)
+            else:
+                self._paths.branches.mkdir(parents=True, exist_ok=True)
+                self._paths.branches.chmod(0o700)
+                shutil.rmtree(path, ignore_errors=True)
+                self._checked("worktree", "add", "--detach", str(path), sha)
+        return path, sha
+
+    def _prune_worktrees(self, remote: list[str]) -> None:
+        self._git("worktree", "prune")
+        if not self._paths.branches.is_dir():
+            return
+        for folder in self._paths.branches.iterdir():
+            if folder.name.replace("%2F", "/") not in remote:
+                self._git("worktree", "remove", "--force", str(folder))
+                shutil.rmtree(folder, ignore_errors=True)
+
+    def _checked_in(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        result = self._run(["git", "-C", str(cwd), *args], {})
+        if result.returncode != 0:
+            raise GitError(f"git {args[0]} failed: {_first_line(result.stderr)}")
+        return result
 
     def _cloned(self) -> bool:
         return (self._paths.repo / ".git").exists()
@@ -335,6 +398,14 @@ def _carries_credentials(url: str) -> bool:
     if scheme in ("http", "https"):
         return True
     return scheme == "ssh" and (":" in userinfo or "/" in userinfo)
+
+
+def _safe_branch(name: str) -> bool:
+    return (
+        _BRANCH.match(name) is not None
+        and not name.startswith("-")
+        and not any(part.startswith(".") for part in name.split("/"))
+    )
 
 
 def _scrub(text: str) -> str:

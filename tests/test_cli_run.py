@@ -9,11 +9,12 @@ from pathlib import Path
 
 import pytest
 from fakesync import install_fake_venv
-from gitutil import make_remote
+from gitutil import make_remote, push_branch
 
 from privacyfence_cockpit.cli import main
 from privacyfence_cockpit.config import EnvConfig
 from privacyfence_cockpit.events import Event
+from privacyfence_cockpit.gitrepo import GitError, GitManager
 from privacyfence_cockpit.history import HistoryFilter
 from privacyfence_cockpit.models import Mode
 from privacyfence_cockpit.notify import Notifier
@@ -368,6 +369,141 @@ def test_test_live_replays_the_recipes(
     assert [row.mode for row in rows] == [Mode.REPLAY]
     assert rows[0].trigger == "manual"
     cockpit.db.close()
+
+
+# --branch
+
+
+BRANCH_ONLY = {"workflows/30-extra/10-only/recipe.yaml": "steps: []\n"}
+
+
+def venv_on_ensure_for(monkeypatch: pytest.MonkeyPatch, venv: Path | None, error: str | None = None) -> None:
+    monkeypatch.setattr(VenvManager, "ensure_for", lambda self, root: VenvResult(venv, False, error))
+
+
+def fake_branch_venv(monkeypatch: pytest.MonkeyPatch, **fake: object) -> Path:
+    cockpit = open_cockpit()
+    venv = install_fake_venv(cockpit.paths, cockpit.db, **fake)  # type: ignore[arg-type]
+    cockpit.db.close()
+    venv_on_ensure_for(monkeypatch, venv)
+    return venv
+
+
+def branch_of_rows() -> list[str | None]:
+    cockpit = open_cockpit()
+    try:
+        return [r["branch"] for r in cockpit.db.query("SELECT branch FROM runs ORDER BY id")]
+    finally:
+        cockpit.db.close()
+
+
+def test_run_on_a_branch_runs_a_recipe_only_the_branch_has(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    push_branch(cloned, BRANCH_ONLY, "topic")
+    fake_branch_venv(monkeypatch)
+    code, out, _ = run(["run", "--branch", "topic", "extra/10-only"], capsys)
+    assert code == 0
+    assert out.splitlines()[-1] == "extra/10-only: ok (exit 0)"
+    assert branch_of_rows() == ["topic"]
+
+
+def test_check_on_a_branch_prints_the_summary(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    push_branch(cloned, BRANCH_ONLY, "topic")
+    fake_branch_venv(monkeypatch)
+    code, out, _ = run(["check", "--branch", "topic", "extra/10-only"], capsys)
+    assert code == 0
+    assert out.splitlines()[-1] == "check: 1 recipe(s), 0 failed"
+
+
+def test_preflight_on_a_branch_runs(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    push_branch(cloned, BRANCH_ONLY, "topic")
+    fake_branch_venv(monkeypatch)
+    assert run(["preflight", "--branch", "topic", "extra"], capsys)[0] == 0
+    assert branch_of_rows() == ["topic"]
+
+
+def test_unknown_branch_exits_1(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    build_venv_on_ensure(monkeypatch)
+    assert run(["run", "--branch", "nope"], capsys) == (1, "", "There is no branch nope on the remote.\n")
+    assert history_rows() == []
+
+
+def test_configured_branch_runs_the_checkout(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    build_venv_on_ensure(monkeypatch)
+    code, out, _ = run(["run", "--branch", "main", "imports/10-sf"], capsys)
+    assert code == 0
+    assert out.splitlines()[-1] == "imports/10-sf: ok (exit 0)"
+    assert branch_of_rows() == [None]
+
+
+def test_dry_run_with_a_branch_exits_1(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_fetch(self: GitManager) -> None:
+        pytest.fail("fetched")
+
+    monkeypatch.setattr(GitManager, "fetch", no_fetch)
+    assert run(["run", "-n", "--branch", "topic"], capsys) == (1, "", "--dry-run cannot be combined with --branch.\n")
+
+
+def test_branch_fetch_failure_exits_2(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def broken(self: GitManager) -> None:
+        raise GitError("no network")
+
+    monkeypatch.setattr(GitManager, "fetch", broken)
+    assert run(["run", "--branch", "topic"], capsys) == (2, "", "no network\n")
+
+
+def test_test_on_a_branch_runs_pytest_in_the_worktree(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PYTEST_ADDOPTS", "")
+    record = tmp_path / "cwd.txt"
+    push_branch(
+        cloned,
+        {"test_cwd.py": f"import os\n\ndef test_cwd():\n    open({str(record)!r}, 'w').write(os.getcwd())\n"},
+        "topic",
+    )
+    venv = fake_branch_venv(monkeypatch)
+    fake_python(venv, with_pytest=True, record=tmp_path / "r")
+    code, _, err = run(["test", "--branch", "topic", "--", "-p", "no:cacheprovider"], capsys)
+    assert (code, err) == (0, "")
+    assert Path(record.read_text()).is_relative_to(tmp_path / "data" / "branches")
+
+
+def test_test_on_a_branch_without_an_environment_exits_2(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    push_branch(cloned, BRANCH_ONLY, "topic")
+    venv_on_ensure_for(monkeypatch, None, "boom")
+    assert run(["test", "--branch", "topic"], capsys) == (2, "", "boom\n")
+    venv_on_ensure_for(monkeypatch, None)
+    assert run(["test", "--branch", "topic"], capsys) == (2, "", "The recipe environment is not ready.\n")
+
+
+def test_test_live_on_a_branch_replays(
+    cloned: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    push_branch(cloned, BRANCH_ONLY, "topic")
+    fake_branch_venv(monkeypatch)
+    code, out, _ = run(["test", "--live", "--branch", "topic", "extra/10-only"], capsys)
+    assert code == 0
+    assert out.splitlines()[-1].startswith("extra/10-only: ok")
+    cockpit = open_cockpit()
+    rows = cockpit.history.query(HistoryFilter())
+    cockpit.db.close()
+    assert [(row.mode, row.branch) for row in rows] == [(Mode.REPLAY, "topic")]
 
 
 # the run lock, events and interruption

@@ -47,6 +47,17 @@
       {% for mode in modes %}<option value="{{ mode }}">{{ mode }}</option>{% endfor %}
     </select>
   </label>
+  {% if branches %}
+  <label>Branch
+    <select name="branch">
+      <option value="">{{ configured_branch }} (configured)</option>
+      {% for branch in branches %}<option value="{{ branch }}">{{ branch }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Also run (on the chosen branch; one recipe or group per line)
+    <textarea name="more" rows="2"></textarea>
+  </label>
+  {% endif %}
   <button type="submit" class="primary">Run selected</button>
 </form>
 {% endif %}

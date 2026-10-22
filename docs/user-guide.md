@@ -145,6 +145,14 @@ The Overview lists the recipes by group, with each recipe's last run, the next s
 | `check` | `privacyfence-sync check` plus the cockpit's own check that the recipe's `work_dir` is git-ignored. |
 | `replay` | Live replay of the recipe's leading read-only steps; see [Live replay](recipe-repository.md#live-replay). |
 
+**Branch and Also run.** When the remote has branches besides the configured one, **Run selected** also shows a
+**Branch** select and an **Also run** box (one recipe or group per line, for recipes that exist only on the branch).
+Every mode works on a branch. The run uses `/data/branches/<branch>` at the branch's newest commit after a fetch, with
+its own `work/` folders and recipe environment, and the server, timezone and timeout from the configured
+`cockpit.yaml`. The per-recipe **Run** button, **Run now** and schedules always use the configured checkout, and branch
+runs do not change a recipe's **Last run**. Running a branch runs its code with the same access as any recipe, so only
+run branches you have looked at.
+
 A recipe that sets its own `server:` talks to that server whatever the cockpit's effective server is; the Overview shows
 `server: <url>` under its name.
 
@@ -175,9 +183,9 @@ running when the cockpit started again is closed as `failed` with the note `the 
 
 **History** lists every run and filters by recipe, outcome, mode, trigger (`manual` or `schedule:<name>`) and dates.
 **Download runs.csv** exports the filtered rows in order with the columns `id, started_at, finished_at, trigger, recipe,
-mode, outcome, exit_code, duration_seconds, commit, token_source, log_path, note`.
+mode, outcome, exit_code, duration_seconds, commit, token_source, log_path, note, branch`.
 
-Each run's log is a file under `/data/logs/<date>/`, with a header (command, token *source*, commit) and a footer
+Each run's log is a file under `/data/logs/<date>/`, with a header (command, token *source*, commit, and a `# branch:` line for branch runs) and a footer
 (exit code, outcome, duration). Log folders older than the retention (90 days by default, see [Settings](#settings))
 are deleted daily; the history rows stay and the run page then shows `log deleted after the retention period`.
 
@@ -208,6 +216,11 @@ The recipe checkout changes **only when you ask**, by fast-forward only, and is 
 
 - The cockpit fetches the remote every 15 minutes (a setting, 5 to 1440). A fetch downloads commits but does not touch
   the checkout. The page shows the commit checked out, the remote tip and `New commits`.
+- The fetch downloads every branch of the remote, but only the configured one is checked out. Branch runs use their own
+  worktrees under `/data/branches`. A worktree with changed tracked files blocks branch runs of that branch (the error
+  names the folder) until you clean it with `docker exec <container> git -C /data/branches/<folder> checkout -- .`,
+  the branch is deleted on the remote, or you use **Re-clone**, which also deletes the branch worktrees and their
+  environments.
 - **Update to latest** fast-forwards the checkout to the remote tip, then rebuilds the recipe environment if
   `requirements.txt` changed. It refuses when tracked files in the checkout have changed (`The checkout has changes to
   tracked files and the cockpit never overwrites them.`) and when the remote branch was rewritten.
@@ -303,15 +316,20 @@ trailing `/recipe.yaml` are ignored. With no `PATH`, every recipe is selected, i
 | `cockpit serve` | Runs the dashboard and the scheduler (the container's default command). |
 | `cockpit user reset-password` | Clears the password and all sessions; prints a new setup code. |
 | `cockpit list` | Lists each group's recipes with the last outcome and time. |
-| `cockpit check [PATH…]` | Mode `check` for each recipe; prints `check: N recipe(s), K failed`. |
-| `cockpit preflight [PATH…] [--attended]` | Mode `preflight`. |
-| `cockpit run [PATH…] [--attended] [-n] [--stop-on-error] [--repeat N]` | Runs recipes now (`-n` / `--dry-run` only prints `would run: <path>`). `--repeat N` runs each recipe up to N times while it ends `ok`. |
+| `cockpit check [PATH…] [--branch NAME]` | Mode `check` for each recipe; prints `check: N recipe(s), K failed`. |
+| `cockpit preflight [PATH…] [--attended] [--branch NAME]` | Mode `preflight`. |
+| `cockpit run [PATH…] [--attended] [-n] [--stop-on-error] [--repeat N] [--branch NAME]` | Runs recipes now (`-n` / `--dry-run` only prints `would run: <path>`). `--repeat N` runs each recipe up to N times while it ends `ok`. |
 | `cockpit permissions [PATH…] [--union \| --by-group] [--json]` | The rules the recipes need. |
-| `cockpit test [-- ARGS]` | Runs the recipe repository's own tests: `python -m pytest -q ARGS` in the checkout, with the recipe environment and no token. Add `pytest` to `requirements.txt` first (`Add pytest to requirements.txt to use cockpit test.`). |
-| `cockpit test --live [PATH…]` | Live replay of the read-only steps. |
+| `cockpit test [--branch NAME] [-- ARGS]` | Runs the recipe repository's own tests: `python -m pytest -q ARGS` in the checkout, with the recipe environment and no token. Add `pytest` to `requirements.txt` first (`Add pytest to requirements.txt to use cockpit test.`). |
+| `cockpit test --live [PATH…] [--branch NAME]` | Live replay of the read-only steps. |
 | `cockpit token set NAME` / `show` / `delete NAME` | Manage stored tokens. |
 | `cockpit schedule list` | Lists the schedules with their next run. |
 | `cockpit git status` / `git update` | Shows the checkout; fast-forwards it and rebuilds the environment. |
+
+`--branch NAME` runs from another branch of the recipe repository instead of the configured one (see [From the
+Overview](#from-the-overview)). The command fetches first and exits 1 with `There is no branch NAME on the remote.` for an
+unknown branch; `PATH`s are then matched against that branch's recipes. `-n` / `--dry-run` cannot be combined with
+`--branch` (`--dry-run cannot be combined with --branch.`, exit 1).
 
 Commands that run recipes or change the checkout take the **run lock**, shared with the server: while the server (or
 another command) runs something, they print `Waiting for the cockpit's current run to finish…` and continue after it. The
@@ -332,8 +350,8 @@ are recorded in History (trigger `manual`) and stream their log lines to the ter
 ## Backups
 
 Everything the cockpit keeps is in the `/data` volume: `cockpit.db` (history, settings, sessions), `secrets/`
-(encrypted), `repo/` (the checkout), `venvs/` (recipe environments), `logs/` and `home/` (SSH host keys). Back up the
-volume **and, separately, the master key**; one without the other cannot restore the secrets. `repo/` and `venvs/` can
+(encrypted), `repo/` (the checkout), `branches/` (worktrees for branch runs), `venvs/` and `branch-venvs/` (recipe environments), `logs/` and `home/` (SSH host keys). Back up the
+volume **and, separately, the master key**; one without the other cannot restore the secrets. `repo/`, `branches/`, `venvs/` and `branch-venvs/` can
 be recreated and may be left out. Stop the container for a consistent copy:
 
 ```bash

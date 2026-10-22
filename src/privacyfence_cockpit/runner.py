@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
 from privacyfence_cockpit.checks import cockpit_problems
 from privacyfence_cockpit.effective import Effective
@@ -36,6 +36,9 @@ from privacyfence_cockpit.recipes import Recipe
 from privacyfence_cockpit.replay import REPLAY_FILE, cut_replay
 from privacyfence_cockpit.tokens import ResolvedToken, TokenResolver
 from privacyfence_cockpit.venvs import VenvManager
+
+if TYPE_CHECKING:
+    from privacyfence_cockpit.branches import BranchCheckout
 
 SHUTDOWN_NOTE = "the cockpit was shut down"
 _POLL_SECONDS = 0.02
@@ -92,11 +95,13 @@ class Runner:
         job_id: str | None,
         on_line: Callable[[str], None] | None = None,
         attended: bool = False,
+        checkout: BranchCheckout | None = None,
     ) -> RunResult:
         token = self._tokens.resolve(recipe)
         eff = self._effective()
         start = self._clock()
-        commit = self._git.head()
+        commit = self._git.head() if checkout is None else checkout.sha
+        root = self._paths.repo if checkout is None else checkout.root
         run_id = self._history.start(
             job_id=job_id,
             trigger=trigger,
@@ -106,6 +111,7 @@ class Runner:
             log_path=None,
             commit_sha=commit,
             token_source=token.source,
+            branch=None if checkout is None else checkout.branch,
         )
         log_file = self._log_file(recipe, start, run_id)
         replay_file = recipe.dir / REPLAY_FILE
@@ -116,16 +122,16 @@ class Runner:
             try:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
                 self._history.set_log_path(run_id, log_file.relative_to(self._paths.root).as_posix())
-                venv = self._venvs.current()
+                venv = self._venvs.current() if checkout is None else checkout.venv
                 result_dir = Path(tempfile.mkdtemp(prefix="cockpit-run-")) if mode in _RUN_MODES else None
                 result_file = None if result_dir is None else result_dir / "result.json"
                 sync = self._venvs.sync_bin(venv) if venv is not None else self._venvs.sync_bin(Path("venv"))
                 nothing_to_replay = mode is Mode.REPLAY and cut_replay(recipe.yaml_path) is None
                 argv = self._argv(sync, recipe, mode, attended, result_file)
                 with log_file.open("w", encoding="utf-8") as log:
-                    self._write_header(log, run_id, recipe, mode, trigger, argv, token, commit, start)
+                    self._write_header(log, run_id, recipe, mode, trigger, argv, token, commit, start, root, checkout)
                     problems = (
-                        cockpit_problems(recipe, self._paths.repo, self._paths.home) if mode is Mode.CHECK else []
+                        cockpit_problems(recipe, root, self._paths.home) if mode is Mode.CHECK else []
                     )
                     for problem in problems:
                         self._emit(log, on_line, f"# cockpit check: {problem}")
@@ -133,7 +139,11 @@ class Runner:
                         self._emit(log, on_line, f"# {NOTHING_TO_REPLAY}")
                         outcome, exit_code, note = Outcome.OK, None, NOTHING_TO_REPLAY
                     elif venv is None:
-                        reason = self._history_db_setting("venv.last_error") or "no environment has been built"
+                        reason = (
+                            self._history_db_setting("venv.last_error")
+                            if checkout is None
+                            else checkout.venv_error
+                        ) or "no environment has been built"
                         self._emit(log, on_line, f"# the recipe environment is not ready: {reason}")
                         outcome, exit_code, note = Outcome.FAILED, None, None
                     else:
@@ -242,9 +252,11 @@ class Runner:
         token: ResolvedToken,
         commit: str | None,
         start: datetime,
+        root: Path,
+        checkout: BranchCheckout | None = None,
     ) -> None:
         shown = ["privacyfence-sync", *argv[1:]]
-        shown[2] = os.path.relpath(argv[2], self._paths.repo)
+        shown[2] = os.path.relpath(argv[2], root)
         for line in (
             f"# PrivacyFence Cockpit run {run_id}",
             f"# recipe: {recipe.path}",
@@ -252,6 +264,7 @@ class Runner:
             f"# command: {shlex.join(shown)}",
             f"# token: {token.source}",
             f"# commit: {commit or 'unknown'}",
+            *([f"# branch: {checkout.branch}"] if checkout is not None else []),
             f"# started: {iso(start)}",
         ):
             log.write(line + "\n")

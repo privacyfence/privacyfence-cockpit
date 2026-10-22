@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess  # nosec B404  # fixed argv, no shell; building the environment is this module's job
@@ -27,6 +28,7 @@ PIN_MESSAGE = "requirements.txt must pin privacyfence-sync (privacyfence-sync==X
 PIP_TIMEOUT_SECONDS = 900
 VERIFY_TIMEOUT_SECONDS = 60
 KEEP_PREVIOUS = 2
+KEEP_BRANCH_VENVS = 2
 READY_MARKER = ".cockpit-ready"
 _BASE_PATH = "/usr/local/bin:/usr/bin:/bin"
 
@@ -82,6 +84,13 @@ def requirement_files(repo: Path) -> list[Path]:
         if pyproject.is_file():
             found.add(pyproject.relative_to(root))
     return [repo / rel for rel in sorted(found)]
+
+
+def _has_local_packages(repo: Path) -> bool:
+    """True when the environment would embed paths of, or copies from, the checkout it is built in."""
+    if len(requirement_files(repo)) > 1:
+        return True
+    return any(_local_path(line) is not None for line in _requirement_lines(repo / "requirements.txt"))
 
 
 def _normalise(name: str) -> str:
@@ -155,12 +164,58 @@ class VenvManager:
             return VenvResult(target, False, None)
         if target.exists():
             shutil.rmtree(target)
-        error = self._build(target, digest)
+        error = self._build(target, digest, self.paths.repo)
         if error is not None:
             return self._fail(digest, error, target)
         (target / READY_MARKER).write_text("")
         self._switch(digest)
         return VenvResult(target, True, None)
+
+    def ensure_for(self, repo: Path) -> VenvResult:
+        """The environment for a branch worktree; never touches the configured one or reports a failure."""
+        try:
+            problem = pin_problem(repo)
+            digest = venv_hash(repo, self._python_version())
+            local = _has_local_packages(repo)
+        except VenvError as exc:
+            return VenvResult(None, False, str(exc))
+        if problem is not None:
+            return VenvResult(None, False, problem)
+        configured = self.paths.venvs / digest
+        if not local and (configured / READY_MARKER).exists():
+            return VenvResult(configured, False, None)
+        target = self.paths.branch_venvs / (f"{repo.name}-{digest}" if local else digest)
+        marker = target / READY_MARKER
+        if marker.exists():
+            self._touch(marker)
+            return VenvResult(target, False, None)
+        self.paths.branch_venvs.mkdir(parents=True, exist_ok=True)
+        self.paths.branch_venvs.chmod(0o700)
+        if target.exists():
+            shutil.rmtree(target)
+        error = self._build(target, digest, repo)
+        if error is not None:
+            shutil.rmtree(target, ignore_errors=True)
+            return VenvResult(None, False, error)
+        marker.write_text("")
+        self._touch(marker)
+        self._prune_branch_venvs(target)
+        return VenvResult(target, True, None)
+
+    def _touch(self, marker: Path) -> None:
+        stamp = self.clock().timestamp()
+        os.utime(marker, (stamp, stamp))
+
+    def _prune_branch_venvs(self, target: Path) -> None:
+        others = [f for f in self.paths.branch_venvs.iterdir() if f.is_dir() and f != target]
+
+        def age(folder: Path) -> float:
+            marker = folder / READY_MARKER
+            return marker.stat().st_mtime if marker.exists() else -1.0
+
+        others.sort(key=age, reverse=True)
+        for folder in others[KEEP_BRANCH_VENVS - 1 :]:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def _python_version(self) -> str:
         if self.python == sys.executable:
@@ -174,7 +229,7 @@ class VenvManager:
         )
         return str(result.stdout).strip() if result.returncode == 0 else "unknown"
 
-    def _build(self, target: Path, digest: str) -> str | None:
+    def _build(self, target: Path, digest: str, repo: Path) -> str | None:
         log = self.paths.logs / "venv" / f"{digest}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         env = {
@@ -188,7 +243,7 @@ class VenvManager:
             str(target / "bin/python"), "-m", "pip", "install",
             "--disable-pip-version-check", "--no-input", "-r", "requirements.txt",
         ]  # fmt: skip
-        for argv, cwd in ((create, None), (pip, self.paths.repo)):
+        for argv, cwd in ((create, None), (pip, repo)):
             try:
                 result = self._run(
                     argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=PIP_TIMEOUT_SECONDS, check=False
